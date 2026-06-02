@@ -4,7 +4,7 @@
 
 ### 任务管理器-图形化
 
-`gnome-sysytem-monitor`
+`gnome-system-monitor`
 
 ### 打开软件
 
