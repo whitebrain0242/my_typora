@@ -356,3 +356,203 @@ class UnionFind {
 
 ```
 
+## 链表 二叉树与回溯
+
+### 链表
+
+#### 遍历链表
+
+#### 删除节点
+
+##### 一般
+
+​     大致思路就是说找到目标节点的前一个节点然后让前一个节点指向当前节点的下一个节点（c++再删除这个节点就好了）
+
+##### 给出要删除的节点P237
+
+​     这时候直接把下一个节点的val值复制到现在这个节点的val里面，再删除下一个节点hhh
+
+##### 删除链表的倒数第 N 个结点P19
+
+​     1.先遍历一边链表，求出链表长度，然后就知道倒数第n个是正数第几个了，然后在遍历一边链表，找到要删除节点的前一个，操作如上
+
+​     2.[快慢指针解法](#删除链表的倒数第n个节点P19)
+
+#####  删除排序链表中的重复元素P83
+
+​     首先，这道题不用创造哨兵节点，因为就算是头节点和下一个节点的数值一样，只用删掉下一个节点就好了
+
+​     从头节点开始遍历cur,如果cur的下一个节点的值和cur相同的话，那么就删除下一个节点，反之，cur移动到下一个节点的地方
+
+##### 删除排序链表中的重复元素 IIP82
+
+​    因为这个重复节点都要删除，所以说需要哨兵节点
+
+​    我们从烧饼节点开始判断，设定next1是下一个节点，next2是下下一个节点，这个时候比较next1和next2,如果相同的话就while删除节点（删除节点），如果不一样的话就后移一个节点
+
+
+
+#### 插入节点
+
+#### 反转链表
+
+两种方法
+
+##### 递归(尾插法)
+
+![image-20260527165716804](/home/white/.config/Typora/typora-user-images/image-20260527165716804.png)
+
+思路：递归到末尾节点，作为新链表的头节点，归的时候再把节点插在新链表的末尾
+
+```
+if(head==nullptr||head->next==nullptr)return head;
+auto rev_head=reverseList(head->next);
+//head指针不变，而是把下一个节点传进函数里面，递归反转后面的链表，把最后的反转链表的头节点存在rev_head
+//下面应该就是写反转链表是怎么实现的
+//从前往后改变
+ListNode*tail=head->next;
+tail->next=head;
+head->next=nullptr;
+return rev_head;
+```
+
+
+
+##### 迭代（头插法
+
+![image-20260527170256733](/home/white/.config/Typora/typora-user-images/image-20260527170256733.png)
+
+对于链表 1→2→3，结合代码来说，顺序为：
+
+第一轮循环结束后，得到链表 1。
+第二轮循环结束后，得到链表 2→1。
+第三轮循环结束后，得到链表 3→2→1。
+
+```
+ListNode*pre=nullptr;
+ListNode*cur=head;
+while(cur){
+    ListNode*nxt=cur->next;//保存一下，防止丢失
+    //反转
+    cur->next=pre;
+    pre=cur;
+    cur=nxt;
+}
+return pre;
+```
+
+##### 某一段反转
+
+left-right
+
+创建一个哨兵节点方便一点dummy
+
+找到left前一个节点
+
+然后这一段内反转
+
+最后看图
+
+![image-20260530151351025](/home/white/.config/Typora/typora-user-images/image-20260530151351025.png)
+
+
+
+
+
+<img src="https://pic.leetcode.cn/1769394801-rMZOrC-%E6%B5%81%E7%A8%8B%E5%9B%BE.png" alt="流程图.png" style="zoom: 25%;" />
+
+```
+ListNode dummy(0, head);
+ListNode* p0 = &dummy;
+
+for (int i = 0; i < left - 1; i++) {
+     p0 = p0->next;
+}
+ListNode* pre = nullptr;
+ListNode* cur = p0->next;
+for (int i = 0; i < right - left + 1; i++) {
+    ListNode* nxt = cur->next;
+    cur->next = pre; // 每次循环只修改一个 next，方便大家理解
+    pre = cur;
+    cur = nxt;
+}
+p0->next->next = cur;
+p0->next = pre;
+return dummy.next;
+
+```
+
+#### 快慢指针
+
+##### 删除链表的倒数第n个节点P19
+
+​      首先判断需不需要创建哨兵节点：如果n=链表长度，也就是删除头节点的话，就需要哨兵节点
+
+​      同理，此题需要哨兵节点，先初始化左右指针都指向`dummynode`，让right先走n步，然后左右指针一起走，等到right指针遍历到最后一个的时候，此时left指针指向的就是要删除节点的前一个节点，此时正常进行删除操作就好了
+
+​      话说怎么理解呢？大概就是说，现在的目标是寻找倒数第n个节点，想象有一把长度刚好为n+1的尺子，当尺子右端在最后一个节点的时候，那么左端就是前一个节点
+
+​     时间复杂度是O(m),m是链表长度，两个循环加起来的长度就是m
+
+​     空间复杂读是O(1),只用到一些额外变量
+
+##### 链表的中间结点P876
+
+​     寻找林链表的中间节点，可以使用快慢指针
+
+​     设定一个快指针一个为慢指针，快指针一次走两步，慢指针一次走1步，这样当快指针为空或者快指针的下一个为空的时候，slow就是中间节点
+
+​     怎么理解呢？快指针的速度是慢指针的两倍，所以路程也就是两倍，如果是奇数个节点的话，fast走到null的时候slow就在中间了，f偶数个节点的话，fast的下一个为空的时候slow就在中间了![image-20260530153443443](/home/white/.config/Typora/typora-user-images/image-20260530153443443.png)
+
+![image-20260530153605452](/home/white/.config/Typora/typora-user-images/image-20260530153605452.png)
+
+​      所以while循环需要判断fast和fats的next是否存在
+
+​      时间复杂读是O(n),空间复杂度是O(1)
+
+##### 环形链表P141
+
+​      如果链表里面有环的话，那么我们可以想象成追击问题，快指针总会追上慢指针，所以再加一个判断，如果slow=fast,那么就是环形链表
+
+##### 环形链表P142
+
+**Floyd 判圈算法**
+
+<img src="file:////home/white/.config/QQ/nt_qq_fa6f8ae2d2dd591655d689996a896030/nt_data/Pic/2026-05/Ori/a931a1ddc5c8f3723329fd7a3853b64b.jpg" alt="img" style="zoom: 33%;" />
+
+​      结论：当快慢指针相遇的时候，慢指针还没有走完一整圈
+
+<img src="file:////home/white/.config/QQ/nt_qq_fa6f8ae2d2dd591655d689996a896030/nt_data/Pic/2026-05/Ori/895ec61437687a97d2832b6f98e92ba2.jpg" alt="img" style="zoom:33%;" />
+
+​       相遇之后，fast和slow都在相遇点，继续走，slow走c步到达入口，head从头节点出发，走了c步之后，还有整数个环长到达入口，此时以slow和head一定会在入口相遇
+
+<img src="file:////home/white/.config/QQ/nt_qq_fa6f8ae2d2dd591655d689996a896030/nt_data/Pic/2026-05/Ori/31d218800b10528ea2c64dabd71f2929.jpg" alt="img" style="zoom:33%;" />
+
+快慢指针相遇的时候，为什么慢指针没有走完内一整圈，按照图上这种极端情况来看，fast需要走(环长-1)步才能追上slow，1.连快指针都走不了一整圈，（以相对速度来看），慢指针更不可能走完一整圈 2. slow走了（环长-1）/2步，那么（环长-1）/2<环长成立，即证
+
+​          所以，这道题只需要额外判断，当快慢指针相遇之后，一直等到慢指针和头节点相遇时，返回slow即是入口!
+
+​          时间复杂度O(n) 空间复杂度O(1)
+
+​          在快慢指针相遇的阶段，慢指针最多走n步进入循环，快指针花费小于n的步数与慢指针相遇，总时间复杂度是On
+
+​          在head和slow相遇阶段：
+
+`head` 从起点到入环点，最多走 `a` 步，`slow` 从相遇点到入环点，最多走 `a` 步（因为其实是c+环长=a），而 `a ≤ n`（因为 `n = a + b`，b≥1），所以这个阶段的步数 ≤ n，时间复杂度为 **O(n)**
+
+​         所以总的时间复杂度是On
+
+##### 重排链表P143
+
+<img src="file:////home/white/.config/QQ/nt_qq_fa6f8ae2d2dd591655d689996a896030/nt_data/Pic/2026-05/Ori/b8f59727d8918cd0cbcdfa546007ec88.jpg" alt="img" style="zoom:33%;" />
+
+​          这道题的思路就是先寻找到中间节点，然后**反转**后半部分的链表，然后重新排序就好了
+
+<img src="file:////home/white/.config/QQ/nt_qq_fa6f8ae2d2dd591655d689996a896030/nt_data/Pic/2026-05/Ori/0e75ebfb5b56ec638f2fcf2cf909f5dc.jpg" alt="img" style="zoom:33%;" />
+
+记得保存head的nxt和head2的nxt做循环，记得反转链表只反转后半部分，然后前面一个后面一个连接起来，最后判断head2的下一个是不是空的就好了
+
+
+
+
+
