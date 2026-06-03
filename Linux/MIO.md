@@ -1,5 +1,819 @@
 # MIO~
 
+
+
+## FTP
+
+### setsockopt 是什么？
+
+全称：
+
+```
+set socket option
+```
+
+用于修改 Socket 的行为。
+
+函数原型：
+
+```
+int setsockopt(
+    int sockfd,
+    int level,
+    int optname,
+    const void *optval,//传递选项值。
+    socklen_t optlen
+);
+```
+
+成功返回：
+
+```
+0
+```
+
+失败返回：
+
+```
+-1
+```
+
+因此代码里：
+
+```
+setsockopt(...) < 0
+```
+
+表示：
+
+```
+如果设置失败
+```
+
+所以说：
+
+```
+int opt = 1;
+
+if (setsockopt(
+        serverFd,//服务器监听 Socket。
+        SOL_SOCKET,//在 Socket 层设置选项
+        SO_REUSEADDR,//允许重用本地地址
+        &opt,//传递选项值，开启 SO_REUSEADDR
+        sizeof(opt)) < 0)//opt 占多少字节
+{
+    perror("setsockopt");
+    exit(EXIT_FAILURE);
+}
+```
+
+网络协议栈有很多层：这里告诉系统：
+
+```
+我要修改 Socket 自身的选项
+```
+
+```
+应用层
+↑
+TCP层
+↑
+IP层
+↑
+Socket层
+```
+
+第三个参数 SO_REUSEADDR
+
+最重要。
+
+```
+SO_REUSEADDR
+```
+
+意思：
+
+```
+允许重用本地地址
+```
+
+------
+
+#### 没有它会发生什么？
+
+假设服务器：
+
+```
+bind(8080)
+listen()
+```
+
+运行中。
+
+然后：
+
+```
+Ctrl+C
+```
+
+关闭服务器。
+
+这时内核不会立刻释放端口。
+
+TCP 会进入：
+
+```
+TIME_WAIT
+```
+
+状态。
+
+可能持续几十秒。
+
+此时马上重启：
+
+```
+./server
+```
+
+会出现：
+
+```
+bind: Address already in use
+```
+
+即：
+
+```
+端口已被占用
+```
+
+实际上是上一个连接还没彻底清理。
+
+------
+
+#### 开启 SO_REUSEADDR
+
+```
+SO_REUSEADDR = 1
+```
+
+后：
+
+```
+bind()
+```
+
+可以立即重新绑定端口。
+
+开发服务器几乎都会写：
+
+```
+int opt = 1;
+
+setsockopt(
+    serverFd,
+    SOL_SOCKET,
+    SO_REUSEADDR,
+    &opt,
+    sizeof(opt));
+```
+
+**请给 serverFd 这个 Socket 设置 SO_REUSEADDR 选项，并把它设置为开启状态。**
+
+
+
+### sockaddr_in 是什么
+
+socket address internet  IPv4 网络地址
+
+```
+struct sockaddr_in
+{
+    sa_family_t sin_family; // 地址族
+
+    in_port_t sin_port;     // 端口号
+
+    struct in_addr sin_addr;// IP地址
+
+    char sin_zero[8];
+};
+```
+
+所以说
+
+
+
+
+
+```
+为什么后面有 {}
+sockaddr_in serverAddr {};
+
+这是 C++11 的统一初始化。
+
+作用：
+
+全部清零
+
+等价于：
+
+sockaddr_in serverAddr;
+memset(&serverAddr, 0, sizeof(serverAddr));
+
+因此：
+
+sin_family = 0
+sin_port   = 0
+sin_addr   = 0
+
+先初始化干净。
+```
+
+```
+serverAddr 的类型
+
+前面定义的是：
+
+sockaddr_in serverAddr;
+
+类型：
+
+sockaddr_in*
+```
+
+
+
+###  sin_addr.s_addr
+
+```
+serverAddr.sin_addr.s_addr
+
+表示：
+
+IP地址
+
+例如：
+
+127.0.0.1
+192.168.1.100
+8.8.8.8
+
+都存在这里。
+```
+
+#### INADDR_ANY
+
+```
+代码：
+serverAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+其中：
+
+INADDR_ANY
+
+值实际上：
+
+0
+
+即：
+
+0.0.0.0
+
+含义不是：
+
+监听 0.0.0.0
+
+而是：
+
+监听本机所有IP
+
+例如机器有：
+
+127.0.0.1
+192.168.1.100
+10.0.0.5
+
+那么：
+
+INADDR_ANY
+
+等价于：
+
+全部监听
+
+客户端都能连：
+
+127.0.0.1:21
+192.168.1.100:21
+10.0.0.5:21
+
+如果写：
+
+inet_addr("127.0.0.1")
+
+则只能本机访问。
+```
+
+### sin_port
+
+```
+serverAddr.sin_port = htons(FTP_PORT);
+
+表示：
+
+监听端口
+
+例如：
+
+FTP_PORT = 21
+
+则：
+
+监听21端口
+```
+
+```
+htons()
+
+全称：
+
+host to network short
+
+因为端口是：
+
+unsigned short
+
+所以使用：
+
+htons()
+
+而不是：
+
+htonl()
+```
+
+
+
+### bind
+
+```
+int bind(
+    int sockfd,
+    const struct sockaddr *addr,
+    socklen_t addrlen
+);
+```
+
+```
+第二个参数要求：
+
+sockaddr*
+
+因此：
+
+sockaddr_in*
+
+需要转换成：
+
+sockaddr*
+
+所以写：
+
+reinterpret_cast<sockaddr*>(&serverAddr)
+```
+
+```
+返回值
+
+成功：
+
+bind(...) == 0
+
+失败：
+
+bind(...) == -1
+
+所以：
+
+if (bind(...) < 0)
+
+表示：
+
+绑定失败
+```
+
+```
+常见错误
+端口已占用
+bind: Address already in use
+
+例如：
+
+已有程序监听 21 端口
+权限不足
+bind: Permission denied
+
+Linux 下：
+
+1024 以下端口
+
+通常需要管理员权限。
+
+例如：
+
+21
+22
+80
+443
+```
+
+```
+如果绑定失败：
+
+close(serverFd);
+
+释放 Socket。
+
+否则会造成资源泄漏。
+```
+
+
+
+### listen
+
+```
+int listen(
+    int sockfd,//就是之前创建并绑定好的 Socket。
+    int backlog///等待队列长度(backlog)
+);
+```
+
+```
+什么叫等待队列？
+
+假设服务器正在工作：
+
+客户端A ---->
+客户端B ---->
+客户端C ---->
+客户端D ---->
+客户端E ---->
+客户端F ---->
+
+而服务器暂时来不及处理。
+
+内核会把这些连接请求先放进队列。
+
+┌─────┐
+│  A  │
+├─────┤
+│  B  │
+├─────┤
+│  C  │
+├─────┤
+│  D  │
+├─────┤
+│  E  │
+└─────┘
+
+队列长度：
+
+5
+
+表示：
+
+最多缓存约5个等待处理的连接
+
+如果第 6 个客户端来：
+
+F
+
+可能会：
+
+连接失败
+
+或者：
+
+被拒绝
+
+具体行为由操作系统决定。
+```
+
+```
+listen(serverFd, SOMAXCONN);
+
+表示：
+
+使用系统允许的最大队列长度
+
+更合理。
+```
+
+```
+状态变成：
+
+LISTEN
+
+这时候：
+
+客户端可以连接
+
+例如：
+
+ftp 127.0.0.1 21
+
+或者：
+
+telnet 127.0.0.1 21
+
+都能发起 TCP 三次握手。
+```
+
+```
+返回值？
+
+成功：
+
+listen(...) == 0
+
+失败：
+
+listen(...) == -1
+
+因此：
+
+if (listen(...) < 0)
+
+表示：
+
+监听失败
+```
+
+
+
+### accept
+
+```
+int accept(
+    int sockfd,//监听 Socket。
+    struct sockaddr *addr,//客户端地址信息
+    socklen_t *addrlen
+);
+```
+
+
+
+```
+连接成功后：
+
+clientAddr.sin_addr
+
+保存客户端 IP。
+
+clientAddr.sin_port
+
+保存客户端端口。
+```
+
+```
+第三个参数
+&clientLen
+
+输入：
+
+结构体大小
+
+输出：
+
+实际写入大小
+```
+
+
+
+```
+accept 会阻塞
+
+这是非常重要的概念。
+
+当没有客户端时：
+
+accept(...)
+
+会停在这里。
+
+等待...
+等待...
+等待...
+
+不会继续执行。
+
+例如：
+
+std::cout << "before\n";
+
+accept(...);
+
+std::cout << "after\n";
+
+运行结果：
+
+before
+
+然后卡住。
+
+直到客户端连接。
+
+才会输出：
+
+after
+```
+
+```
+实际上：
+
+serverFd
+
+负责：
+
+监听
+clientFd
+
+负责：
+
+通信
+
+例如：
+
+int serverFd = socket(...);
+
+bind(...);
+
+listen(...);
+
+得到：
+
+监听Socket
+
+客户端连接：
+
+int clientFd = accept(...);
+
+得到：
+
+通信Socket
+
+关系如下：
+
+serverFd
+    ↓
+监听21端口
+
+客户端A：
+
+accept()
+   ↓
+clientFd = 5
+
+客户端B：
+
+accept()
+   ↓
+clientFd = 6
+
+客户端C：
+
+accept()
+   ↓
+clientFd = 7
+
+所以：
+
+serverFd 永远不变
+
+负责接客。
+
+而：
+
+clientFd
+
+负责和某个具体客户端聊天。
+```
+
+
+
+### INET_ADDRSTRLEN 是什么？
+
+系统定义的常量：
+
+```
+INET_ADDRSTRLEN
+```
+
+IPv4 下通常是：
+
+```
+16
+```
+
+因为最长的 IPv4 地址：
+
+```
+255.255.255.255
+```
+
+长度：
+
+```
+15 个字符
+```
+
+再加：
+
+```
+\0
+```
+
+结束符。
+
+所以：
+
+```
+char ip[16];
+```
+
+实际上和：
+
+```
+char ip[INET_ADDRSTRLEN];
+```
+
+效果一样。
+
+### inet_ntop
+
+network to presentation
+网络格式 → 可读格式
+
+```
+inet_ntop(
+    AF_INET,//ipv4
+    &clientAddr.sin_addr,//客户端ip   字符串连接过来是二进制格式
+    ip,//转换后存在这里，是十进制模式
+    sizeof(ip));//最多写多少字节
+```
+
+```
+const char* inet_ntop(
+    int af,
+    const void* src,
+    char* dst,
+    socklen_t size
+);
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## 了
+
 ### 为什么不能直接保存entry->d_name?
 
 entry是一个指针，是linux定义好的结构体
@@ -517,3 +1331,4 @@ rld
 应用层协议
 ```
 
+### 
