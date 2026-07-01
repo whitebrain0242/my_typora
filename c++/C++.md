@@ -6,6 +6,272 @@
 
 ### 基础语法
 
+#### 作用域与命名空间
+
+##### 作用域scope是什么？
+
+其实就是一个变量有效的空间，举例如下：
+
+```c++
+int global = 1;           // 全局作用域
+
+void func() {
+    int local = 2;        // 局部作用域
+    if (true) {
+        int block = 3;    // 块作用域（if 语句内）
+        global = 10;      // 可以访问全局
+    }
+    // block 在这里已经不可见
+}
+
+int main() {
+    func();
+    // local 不可见
+    // block 不可见
+    global = 20;          // 全局仍然可见
+}
+```
+
+##### 命名空间是什么？
+
+它的主要目的是**避免名字冲突**（尤其是当使用多个库时）。
+
+
+
+
+
+
+
+
+
+#### using
+
+`using` 是 C++ 中的一个**关键字**，它有多种用途。根据语境不同，它可以用来：
+
+1.  **引入命名空间中的名字**（`using 声明` 和 `using 指令`）
+2.  **创建类型别名**（替代 `typedef`，C++11 起）
+3.  **在派生类中引入基类成员**（改变访问权限或解决重载问题）
+
+
+
+##### 一、`using` 与命名空间
+
+这是最常见的用法，用于避免反复写 `namespace::`。
+
+###### 1. `using` 声明 (using declaration)
+
+**语法：** `using 命名空间::名字;`
+
+将指定的名字引入当前作用域，之后可以直接使用该名字。
+
+```
+#include <iostream>
+#include <vector>
+
+int main() {
+    using std::cout;   // 引入 cout
+    using std::endl;   // 引入 endl
+    cout << "Hello" << endl;   // 不用写 std::cout
+
+    // 也可以引入类型
+    using std::vector;
+    vector<int> v = {1,2,3};
+}
+```
+
+
+
+**特点：**
+
+-   引入的单个名字在当前作用域可见。
+-   如果当前作用域已有同名实体，会发生**冲突**（编译错误）。
+-   比 `using namespace` 更安全，因为只引入需要的名字。
+
+###### 2. `using` 指令 (using directive)
+
+**语法：** `using namespace 命名空间名;`
+
+将整个命名空间的所有名字**引入当前作用域**（确切说是使它们看起来像在当前作用域声明的一样）。
+
+cpp
+
+```
+#include <iostream>
+#include <vector>
+
+int main() {
+    using namespace std;   // 引入整个 std 命名空间
+    cout << "Hello" << endl;   // 可以
+    vector<int> v;              // 可以
+}
+```
+
+
+
+**特点：**
+
+-   简单粗暴，但容易造成名字冲突。
+-   **强烈不建议**在头文件中使用（会污染全局空间）。
+-   在 `.cpp` 文件中谨慎使用（最好只在局部作用域或函数内部使用）。
+
+------
+
+##### 二、`using` 作为类型别名（C++11）
+
+C++11 引入了 `using` 类型别名语法，可以完全替代 `typedef`，而且语法更清晰（尤其是函数指针、模板别名时优势明显）。
+
+###### 语法：`using 新名字 = 已有类型;`
+
+cpp
+
+```
+// 传统 typedef
+typedef unsigned long long uint64;
+// 现代 using
+using uint64 = unsigned long long;
+
+// 复杂类型：函数指针
+typedef void (*FuncPtr)(int, double);
+using FuncPtr = void (*)(int, double);   // 更易读
+
+// 模板别名（typedef 做不到）
+template<typename T>
+using Vec = std::vector<T>;   // Vec<int> 等价于 std::vector<int>
+```
+
+
+
+**与 `typedef` 对比：**
+
+| 能力         | `typedef`     | `using` 别名 |
+| :----------- | :------------ | :----------- |
+| 简单类型别名 | ✅             | ✅            |
+| 函数指针     | ✅（但语法难） | ✅（更清晰）  |
+| 模板别名     | ❌             | ✅            |
+| 作用域规则   | 相同          | 相同         |
+
+------
+
+##### 三、`using` 在继承中引入基类成员
+
+在派生类中，可以用 `using` 将基类的**构造函数**或**成员函数**引入到派生类作用域（通常用于改变访问权限或重新暴露被隐藏的重载）。
+
+###### 1. 引入基类构造函数（C++11）
+
+让派生类直接继承基类的所有构造函数（而不是手动定义）。
+
+cpp
+
+```
+struct Base {
+    Base(int x) {}
+    Base(double d) {}
+};
+
+struct Derived : Base {
+    using Base::Base;   // 继承 Base 的所有构造函数
+    // 相当于自动生成 Derived(int) 和 Derived(double)
+};
+
+Derived d1(10);    // OK
+Derived d2(3.14);  // OK
+```
+
+
+
+###### 2. 引入基类成员函数（解决名字隐藏）
+
+如果派生类定义了同名函数（即使参数不同），会隐藏基类的所有同名重载。可以用 `using` 把基类的重载也引入进来。
+
+cpp
+
+```
+struct Base {
+    void f(int) {}
+    void f(double) {}
+};
+
+struct Derived : Base {
+    using Base::f;    // 引入 Base 的所有 f 重载
+    void f(char) {}   // 增加一个新的重载
+};
+
+int main() {
+    Derived d;
+    d.f(10);    // 调用 Base::f(int)
+    d.f(3.14);  // 调用 Base::f(double)
+    d.f('a');   // 调用 Derived::f(char)
+}
+```
+
+
+
+###### 3. 改变访问权限
+
+基类中的 `protected` 成员可以通过 `using` 在派生类中变为 `public`（仅限该派生类）。
+
+cpp
+
+```
+struct Base {
+protected:
+    void protectedFunc() {}
+};
+
+struct Derived : Base {
+public:
+    using Base::protectedFunc;   // 现在对外公开
+};
+
+int main() {
+    Derived d;
+    d.protectedFunc();   // OK，原来不可访问
+}
+```
+
+
+
+------
+
+##### 四、总结：`using` 的三种角色
+
+| 用途                     | 示例                                               | 说明                        |
+| :----------------------- | :------------------------------------------------- | :-------------------------- |
+| **命名空间引入**（声明） | `using std::cout;`                                 | 引入单个名字                |
+| **命名空间引入**（指令） | `using namespace std;`                             | 引入整个命名空间（谨慎）    |
+| **类型别名**（C++11）    | `using int64 = long long;`                         | 比 `typedef` 更现代         |
+| **模板别名**             | `template<typename T> using Vec = std::vector<T>;` | `typedef` 做不到            |
+| **继承构造函数**         | `using Base::Base;`                                | C++11，继承所有基类构造函数 |
+| **引入基类成员函数**     | `using Base::func;`                                | 解决名字隐藏问题            |
+| **改变访问权限**         | `using Base::protectedMember;` 放在 `public:` 下   | 提升可访问性                |
+
+------
+
+##### 五、常见误区提醒
+
+-   **`using namespace std;`** 在初学者代码中常见，但大型项目、头文件中应该避免。推荐使用 `std::` 前缀或 `using std::cout;` 等局部声明。
+-   **`using` 类型别名**和 `typedef` 的效果完全相同（除了模板别名）。现代 C++ 推荐使用 `using`，因为语法一致且更可读。
+-   **`using` 不能把基类的私有成员引入**（因为私有成员原本就不可访问）。
+-   `using` 在继承中引入的构造函数会**按照基类的定义**构造，不会合成默认参数等额外行为。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 #### 数据类型
 
 ```c
@@ -116,18 +382,21 @@ cout << x << " " << y << endl; // 连续输出
 -  `endl`：表示 “换行 + 刷新缓冲区”，等价于 `'\n'` 但会立刻清空输出缓存
 -  变量 `a` 定义时没有初始化，但 `cin >> a` 会给它赋值，所以不会出问题
 
-#### 循环
 
-```c
-int arr[] = {1,2,3};
-for (int x : arr) {
-    cout << x;
-}
-```
 
 
 
 ## 面向对象
+
+
+
+
+
+
+
+
+
+
 
 ## 核心特性和进阶语法
 
@@ -135,9 +404,41 @@ for (int x : arr) {
 
 参数是调用的时候就直接提供给你，但是捕获是现在存好，以后自己用，就不用传参数了，比如说线程就不需要传参数
 
+```
+auto dfs = [&](this auto&& dfs, /* 入参 */) -> /* 返回类型 */ {
+    
+};
+
+this auto&& dfs：显式对象参数。
+
+this 关键字标记了这是一个显式对象参数，表示它代表 lambda 对象本身。
+
+auto&& 是参数的类型占位符，自动推导 lambda 对象的完整类型（包括 const、引用等修饰）。auto&& 是万能引用，可以保持 lambda 的值类别（左值或右值）。
+
+dfs 是这个参数的名称，在 lambda 体内可以用这个名字来递归调用自身。
+```
+
+
+
 ```c
 [捕获] (参数) -> 返回值 { 函数体 };
 ```
+
+
+
+**为什么要用入参而不是直接在lamada外面定义变量，而且&可以直接引用？**
+
+因为捕获的话在整个lamada生命周期只有一份，不能保存每一层递归的值，但是参数可以
+
+捕获适合在递归过程中不变或者需要共享的数据：比如说sum等
+
+参数适合在递归每一层值都不一样的数据，如当前节点，当前深度
+
+
+
+
+
+
 
 捕获列表[]
 
@@ -169,13 +470,28 @@ int a = 10;
 
 {代码}里面是函数内容
 
-## API
+## 库和工具类
 
-### **输入输出**
+### STL
 
-### **Container容器类**
+（Standard Template Library，标准模板库）
 
-#### 顺序容器
+#### **Container容器类**
+
+| 容器             | 特点             |
+| ---------------- | ---------------- |
+| `vector`         | 动态数组，最常用 |
+| `array`          | 固定长度数组     |
+| `list`           | 双向链表         |
+| `deque`          | 双端队列         |
+| `stack`          | 栈（后进先出）   |
+| `queue`          | 队列（先进先出） |
+| `priority_queue` | 优先队列（堆）   |
+| `set`            | 自动排序且不重复 |
+| `multiset`       | 自动排序可重复   |
+| `map`            | 键值对，自动排序 |
+| `unordered_set`  | 哈希集合         |
+| `unordered_map`  | 哈希表           |
 
 ##### vector
 
@@ -195,6 +511,9 @@ int a = 10;
 1. 头文件
 #include <vector>   // 必须加
 using namespace std;
+//如果是这样的
+vector<int>& nums
+   //那么其实表示就是直接使用原数组而不是拷贝一个数组，这样效率更快，也可正常进行调用
 
 2. 创建 vector
 vector<int> v;        // 空的
@@ -250,11 +569,299 @@ auto it = find(v.begin(), v.end(), 10);//查找
 
 
 
-#### 关联容器
+#### 算法Algorithms
 
-#### 容器适配器
+```
+头文件：
 
-### **算法**
+#include <algorithm>
+
+STL提供大量现成算法。
+
+排序
+std::sort(v.begin(), v.end());
+
+例子：
+
+std::vector<int> v = {5,1,3,2,4};
+
+std::sort(v.begin(), v.end());
+
+结果：
+
+1 2 3 4 5
+查找
+auto it = std::find(
+    v.begin(),
+    v.end(),
+    3
+);
+最大值
+int mx = *std::max_element(
+    v.begin(),
+    v.end()
+);
+反转
+std::reverse(
+    v.begin(),
+    v.end()
+);
+```
+
+
+
+#### 迭代器
+
+#### 函数对象Functors
+
+
+
+
+
+
+
+
+
+
+
+
+
+### std::filesystem
+
+##### 常用操作分类
+
+###### 1. 路径信息获取（分解与组合）
+
+| 操作                  | 示例代码                | 结果（假设 `p = "/home/user/file.txt"`） |
+| :-------------------- | :---------------------- | :--------------------------------------- |
+| 文件名（含扩展名）    | `p.filename()`          | `"file.txt"`                             |
+| 扩展名                | `p.extension()`         | `".txt"`                                 |
+| 不含扩展名的文件名    | `p.stem()`              | `"file"`                                 |
+| 父路径                | `p.parent_path()`       | `"/home/user"`                           |
+| 根目录（Unix 为 `/`） | `p.root_directory()`    | `"/"`                                    |
+| 拼接路径              | `p / "sub" / "new.txt"` | `"/home/user/file.txt/sub/new.txt"`      |
+| 转换为字符串          | `p.string()`            | `"/home/user/file.txt"`                  |
+
+**示例**：
+
+cpp
+
+```
+fs::path p = "/home/user/docs/notes.txt";
+std::cout << p.stem() << '\n';      // notes
+std::cout << p.extension() << '\n'; // .txt
+fs::path parent = p.parent_path();  // /home/user/docs
+fs::path full = parent / "archive" / "old.txt";
+std::cout << full; // /home/user/docs/archive/old.txt
+```
+
+
+
+------
+
+###### 2. 文件/目录状态查询
+
+| 操作             | 示例代码                 | 说明                       |
+| :--------------- | :----------------------- | :------------------------- |
+| 是否存在         | `fs::exists(p)`          | 返回 `bool`                |
+| 是否是普通文件   | `fs::is_regular_file(p)` |                            |
+| 是否是目录       | `fs::is_directory(p)`    |                            |
+| 是否是符号链接   | `fs::is_symlink(p)`      |                            |
+| 文件大小         | `fs::file_size(p)`       | 返回 `uintmax_t`，单位字节 |
+| 最后修改时间     | `fs::last_write_time(p)` | 返回 `file_time_type`      |
+| 获取状态（批量） | `fs::status(p)`          | 返回 `file_status` 对象    |
+
+cpp
+
+```
+fs::path p = "data.txt";
+if (fs::exists(p)) {
+    std::cout << "Size: " << fs::file_size(p) << " bytes\n";
+    auto ftime = fs::last_write_time(p);
+    // 转换为 time_t 打印较复杂，可借助 std::chrono
+} else {
+    std::cout << "File not found\n";
+}
+```
+
+
+
+------
+
+###### 3. 目录操作（创建、遍历、删除）
+
+创建目录
+
+cpp
+
+```
+fs::create_directory("mydir");            // 创建单层目录
+fs::create_directories("a/b/c");          // 递归创建多层目录（自动创建父目录）
+```
+
+遍历目录
+
+使用 **目录迭代器**：`directory_iterator` 和 `recursive_directory_iterator`。
+
+cpp
+
+```
+// 遍历当前目录下的所有文件/目录（不递归）
+for (const auto& entry : fs::directory_iterator(".")) {
+    std::cout << entry.path() << '\n';
+}
+
+// 递归遍历所有子目录
+for (const auto& entry : fs::recursive_directory_iterator(".")) {
+    std::cout << entry.path() << '\n';
+}
+```
+
+
+
+每个 `entry` 是 `directory_entry` 对象，可以调用 `path()`、`is_regular_file()` 等。
+
+删除
+
+cpp
+
+```
+fs::remove("file.txt");                 // 删除单个文件或空目录
+fs::remove_all("some_directory");       // 递归删除目录及其所有内容（慎用）
+```
+
+
+
+------
+
+###### 4. 文件操作（复制、移动、重命名）
+
+cpp
+
+```
+fs::copy("from.txt", "to.txt");                     // 复制文件
+fs::copy("from_dir", "to_dir", fs::copy_options::recursive); // 递归复制目录
+
+fs::rename("oldname.txt", "newname.txt");           // 重命名或移动（跨目录也可）
+```
+
+
+
+------
+
+###### 5. 当前路径与绝对路径
+
+cpp
+
+```
+fs::path cur = fs::current_path();      // 获取当前工作目录
+fs::current_path("/new/path");          // 设置当前工作目录
+
+fs::path abs = fs::absolute("relative/path");       // 转为绝对路径
+fs::path canon = fs::canonical("./../file.txt");    // 解析符号链接，返回规范化的绝对路径
+```
+
+
+
+##### 错误处理
+
+大多数 `filesystem` 函数有**两个重载**：
+
+-   抛出异常版本（默认）– 失败时抛出 `std::filesystem::filesystem_error`
+-   接受 `std::error_code&` 的版本 – 不抛异常，通过 `error_code` 查看错误。
+
+cpp
+
+```
+std::error_code ec;
+fs::remove("somefile.txt", ec);
+if (ec) {
+    std::cerr << "删除失败: " << ec.message() << '\n';
+}
+```
+
+
+
+推荐在关键路径上使用 `error_code` 版本，避免异常导致程序崩溃。
+
+### std::signal
+
+
+
+| 宏名                  | 含义                   | 默认行为              |
+| :-------------------- | :--------------------- | :-------------------- |
+| `SIGINT`              | 终端中断（Ctrl+C）     | 终止程序              |
+| `SIGTERM`             | 终止请求（kill 默认）  | 终止程序              |
+| `SIGSEGV`             | 段错误（非法内存访问） | 产生 core dump 并终止 |
+| `SIGABRT`             | 调用 `std::abort()`    | 终止程序              |
+| `SIGFPE`              | 浮点异常（除零等）     | 终止程序              |
+| `SIGUSR1` / `SIGUSR2` | 用户自定义信号         | 终止程序              |
+
+用法：
+
+1. 注册自定义处理函数
+
+
+
+```
+std::signal(SIGINT, my_handler);   // 发生 SIGINT 时调用 my_handler
+```
+
+2. 恢复默认行为
+
+
+
+```
+std::signal(SIGINT, SIG_DFL);       // 变成默认行为（通常是终止程序）
+```
+
+3. 忽略信号
+
+
+
+```
+std::signal(SIGINT, SIG_IGN);       // 忽略 SIGINT，Ctrl+C 无效
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 ### **工具函数**
 
@@ -326,6 +933,58 @@ cv.wait(lock, [&]() {
  cv.notify_one();
  notify_all()
 ```
+
+##### ♾️
+
+```
+int sum = INT_MIN;
+```
+
+##### 转大小写
+
+转为大写
+
+```
+char ch = 'x';
+char up = std::toupper(ch);
+```
+
+转为小写
+
+```
+char ch = 'X';
+    char low = std::tolower(ch);
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
