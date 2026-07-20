@@ -369,7 +369,7 @@ poll到底是干啥的？
 
 函数调用相当于给操作系统内核说，这个是我想监视的socket列表，一共有nfds个，你帮我盯着，-1是我不设置超时，一直等，直到有任何一个socket有动静了，就告诉我
 
-所以说select和poll其实都是让操作系统的内核去监视socket的变化。变化保存在revents,之后遍历所有socket，（这里做不到只遍历有变化的socket,而是遍历所有socket,通过检查标志，把有变化的挑出来）然后一个一个去处理有变化的是吗
+所以说select和poll其实都是让操作系统的内核去监视socket的变化。变化保存在revents,之后遍历所有socket，（这里做不到只遍历有变化的socket,而是遍历所有socket,通过检查标志，把有变化的挑出来）然后一个一个去处理有变化的
 
 **流程**：
 
@@ -454,6 +454,7 @@ struct epoll_event {
     epoll_data_t data; // 【灵魂字段】这是一个共用体，你可以存 fd，或者存指针！
 };
 //回传数据模板：把这个data原样深拷贝一份，挂到红黑树节点里面，也就是epollwait返回的那一刻
+//共用体
 typedef union epoll_data {
     void    *ptr;      // 可以放指向自定义结构体的指针（高级用法）
     int      fd;       // 【最常用】存 socket 的文件描述符
@@ -599,4 +600,177 @@ if (ev & (EPOLLERR | EPOLLHUP | EPOLLRDHUP))
 **那么为什么不用epoll而是poll？**
 
 因为客户端只需要监听两个文件描述符，一个键盘一个网络连接，而epoll属于大炮打蚊子，epoll是为了海量连接准备的，创建开销更大，但是poll在fd少的时候，和epoll几乎没有区别，更标准更加轻量化
+
+#### DAY6
+
+##### 共用体是啥？里面的指针是啥
+
+
+
+```c
+typedef union epoll_data {
+    void    *ptr;      // 可以放指向自定义结构体的指针（高级用法）
+    int      fd;       // 【最常用】存 socket 的文件描述符
+    uint32_t u32;
+    uint64_t u64;
+} epoll_data_t;
+```
+
+这个是一个共用体，在epoll_wait收到的就绪链表event里面，每一个就绪的元素都有一个这个共用体：目的是为了节省空间内存，让效率更加快速
+
+**对于指针？**
+
+它是一个**“万能指针”**（`void*` 表示它可以指向任何类型的数据）。
+
+-   它的大小固定（8 字节，在 64 位系统上），和 `data.fd` 共用同一块内存。
+-   它存在的目的：**让你能把“文件描述符（fd）”和“跟这个 fd 相关的所有业务数据（缓冲区、回调函数、状态码）”捆绑在一起。**
+-   如果不用 `ptr`，当服务器收到消息时，它只知道 `fd=5`，必须去问“fd=5 是谁？”，然后找到这个人的昵称和消息队列。
+    如果用 `ptr`，当服务器收到消息时，它直接拿到 `Client*`，里面**已经存好了**昵称 `"张三"` 和待发送的缓冲队列，直接把消息塞进去就行。
+
+
+
+##### 编译运行
+
+```c
+cmake -S . -B build
+cmake --build build
+```
+
+命令一：`cmake -S . -B build`
+
+-   **`-S .`**（Source）：指定**源代码目录**为当前目录（`.`）。CMake 会去这里找你的 `CMakeLists.txt`。
+-   **`-B build`**（Build）：指定**构建输出目录**为 `build` 文件夹。如果该文件夹不存在，CMake 会自动创建。
+-   **内核动作**：
+    1.  读取当前目录的 `CMakeLists.txt`。
+    2.  检测你的编译器（GCC/Clang/MSVC）、系统类型（Linux/Windows）。
+    3.  根据你的 `CMakeLists.txt` 中的 `add_executable(chat_server server.cpp)` 等指令，在 `build` 目录下生成**平台原生的构建文件**（Linux/Mac 下是 `Makefile`，Windows 下是 `.sln`/`.vcxproj` 或 `ninja.build`）。
+
+**此时，`build` 文件夹里全是中间文件（CMakeCache.txt、Makefile 等），还没有任何 `.o` 目标文件或可执行文件。**
+
+命令二：`cmake --build build`
+
+**这是“编译（Build）+ 链接（Link）”阶段。**
+
+-   **`--build`**：这是一个通用指令，告诉 CMake 去调用**底层构建工具**（比如 Linux 下的 `make`，Windows 下的 `msbuild` 或 `ninja`）。
+-   **`build`**：告诉 CMake 去哪个目录执行构建。
+-   **内核动作**：
+    1.  CMake 进入 `build` 目录，找到上一步生成的 `Makefile`（或 `.sln`）。
+    2.  执行构建命令（等价于你在 `build` 目录里手动敲 `make`）。
+    3.  编译器开始编译 `server.cpp` 和 `client.cpp`，生成 `.o` 目标文件，最后链接生成最终的**可执行文件** `chat_server` 和 `chat_client`（它们会出现在 `build/` 目录下）。
+
+
+
+##### EPOLLOUT
+
+**🔥 如果你“一直监听 EPOLLOUT”会发生什么？（CPU空转）**
+
+假设你的代码注册事件时写成了：`EPOLLIN | EPOLLOUT`（永远监听可读和可写）。
+
+**场景推演（水平触发 LT，epoll 的默认模式）：**
+
+1.  连接建立成功，内核为这个 socket 分配了 **8KB 的发送缓冲区**，此时缓冲区是 **空的**（空闲空间 = 8KB）。
+2.  因为缓冲区是空的，满足 `EPOLLOUT`（有空间）的条件。
+3.  `epoll_wait` 返回，告诉你这个 fd 可写。你此时可能**没有任何数据要发**（`out_buffer` 是空的），但系统还是通知了你。
+4.  你无事可做，继续调用 `epoll_wait`。
+5.  因为缓冲区**依然是空的**（依然满足“有空间”条件），`epoll_wait` **立刻又返回了**。
+6.  **死循环开始**：`epoll_wait` 一秒钟可能返回几万次，但你没有数据要发，CPU 被这个空转吃满，而业务数据（收消息）却得不到处理。
+
+**这就是文中所说的：“疯狂返回这个 fd 的可写事件，导致 CPU 空转（忙轮询）”。**
+
+----
+
+
+
+**✅ 为什么要“动态加/减”？（正确的做法）**
+
+**核心原则**：**只有当我手里确实有苹果（`out_buffer` 里有数据）时，我才举手（注册 `EPOLLOUT`）告诉老师（内核）我要发言。数据发完了，我就把手放下（取消 `EPOLLOUT`）。**
+
+**流程演示：**
+
+-   **平时（空闲状态）**：注册的事件只有 `EPOLLIN`（只监听读）。哪怕发送缓冲区能塞进一座泰山，`epoll_wait` 也**不会**因为“能写”而唤醒你，CPU 非常安静。
+-   **触发发送（有数据要发）**：
+    1.  你的业务逻辑调用 `send()`，发现内核缓冲区满了，只发出去了 100 字节，剩下 900 字节还在 `out_buffer` 里。
+    2.  **关键动作**：你立刻调用 `update_epoll_events`，把 `EPOLLOUT` **加上**。
+    3.  现在事件变成 `EPOLLIN | EPOLLOUT`。
+    4.  因为发送缓冲区有了空闲，`epoll_wait` 立即返回可写事件，你调用 `handle_client_write` 去把 `out_buffer` 里剩余的 900 字节拼命塞给内核。
+    5.  直到所有数据塞完，`out_buffer` 变为**空**。
+    6.  **再次关键动作**：你再次调用 `update_epoll_events`，把 `EPOLLOUT` **去掉**。
+    7.  事件回到 `EPOLLIN` 状态，世界再次安静下来，不再有无效的“可写”通知。
+
+
+
+
+
+##### queue_message
+
+```
+. 为什么“不能”在 queue_message 里直接 send？
+假设你在 queue_message 里直接写：
+
+cpp
+send(client_fd, message.c_str(), message.size(), 0);
+在非阻塞模式下，send 会有两种结局：
+
+结局一（好运气）：内核的发送缓冲区有空位，数据成功发出去了。一切正常。
+
+结局二（坏运气）：对方电脑死机、网线松了、或者对方应用层处理太慢，导致 TCP 窗口关闭。此时内核发送缓冲区满了。send 不会等待，而是立刻返回 -1，并设置 errno = EAGAIN 或 EWOULDBLOCK。
+
+请问，当发生结局二时，你的代码该怎么处理？
+你只能：
+
+把没发完的数据先存起来（存到 out_buffer）。
+
+等着 EPOLLOUT 事件。
+
+等内核通知你“有空间了”，你再把存起来的数据发出去。
+
+结论：只要你想写出健壮的网络程序，out_buffer 和 EPOLLOUT 是绕不开的。因为无论你多着急，网络带宽和对端的接收能力不由你的代码控制。
+
+2. 为什么策略是“不立即调用 send”？（纯粹的异步解耦）
+既然无论如何都要处理 EAGAIN，那就干脆把逻辑全部统一放到事件循环里处理。
+
+设计哲学：业务层（queue_message）只负责“生产消息”，网络层（handle_client_write）只负责“发送消息”。
+
+在 queue_message 里不碰 send，意味着业务逻辑永远不需要关心 EAGAIN 是什么东西。它只管把字符串往 out_buffer 后面一丢，然后拍拍屁股走人。
+
+这样做最大的好处是：避免了你陷入“部分发送”的泥潭。如果你在 queue_message 里调用 send，发送了 50 字节，还剩 50 字节，你就必须维护“下次从哪个位置继续发”的偏移量，代码会瞬间变得极其丑陋。
+
+3. 性能会不会变差？（延迟担心）
+你可能会想：“放到队列里，得等到下一轮 epoll_wait 触发才能发，这不是白白浪费了几十微秒吗？”
+
+实际上，现代高性能网络库（如 Netty、muduo、Redis）的通用做法是“先尝试立即发送，失败再入队”。虽然你给的描述是“策略：不是立即调用 send”，但在真正的工业级代码中，通常会这样优化 queue_message：
+
+cpp
+void queue_message(int epoll_fd, int client_fd, const string& msg) {
+    // 1. 先尝试直接发送（减少一次 epoll 循环延迟）
+    ssize_t n = send(client_fd, msg.c_str(), msg.size(), 0);
+    if (n == (ssize_t)msg.size()) {
+        return; // 运气好，一次性发完，皆大欢喜
+    }
+
+    // 2. 如果没发完或者遇到 EAGAIN
+    if (n > 0) out_buffer.append(msg.substr(n)); // 发了部分，剩下的入队
+    else out_buffer.append(msg);                 // 完全没发出去，全部入队
+
+    // 3. 开启 EPOLLOUT，等待下一次可写
+    update_epoll_events(epoll_fd, client_fd); 
+}
+但是，如果你的描述严格限定为“不立即 send，全部入队”，那这种设计通常是出于 “单线程Reactor的极简主义” —— 为了确保所有的 I/O 操作（读和写）绝对只在主循环的 handle_client_read/write 中发生，避免在多线程环境下抢锁导致的复杂性。这种设计下，延迟增加的是 epoll_wait 一轮循环的时间（通常不到 0.1ms），对于非实时性业务完全可以接受。
+
+💡 一句话总结你的代码逻辑
+queue_message 就是给 TCP 内核缓冲区加了一个“应用层泄洪池”。
+
+如果直接发（内核有空位）：水直接流走。
+
+如果内核堵了（EAGAIN）：水先存在你家的池子（out_buffer）里。
+
+开启 EPOLLOUT：相当于在池子底部装了一个传感器，当
+```
+
+##### 不同操作系统的换行格式不同
+
+Linux:   \n
+Windows: \r\n
+
+所以在读取命令的时候要格外注意转换
 
