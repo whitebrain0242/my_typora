@@ -457,7 +457,7 @@ struct epoll_event {
 //共用体
 typedef union epoll_data {
     void    *ptr;      // 可以放指向自定义结构体的指针（高级用法）
-    int      fd;       // 【最常用】存 socket 的文件描述符
+    int      fd;       // 绑定fd,可以返回时知道fd
     uint32_t u32;
     uint64_t u64;
 } epoll_data_t;
@@ -774,3 +774,169 @@ Windows: \r\n
 
 所以在读取命令的时候要格外注意转换
 
+#### DAY7
+
+##### EPOLLRDHUP
+
+. 它和 `EPOLLHUP` 有什么区别？
+
+-   **`EPOLLHUP`（本地挂断）**：代表**本端**的套接字发生了错误或挂断（比如管道断裂、设备错误）。这通常是一个**意外**或异常状态。
+-   **`EPOLLRDHUP`（远程挂断）**：代表**对端**正常地关闭了连接（优雅地挂了电话）。这是一个**预期内**的事件。
+
+2. **在你的代码中，它是怎么起作用的？**
+
+你的两段代码都出现了这个组合：
+
+
+
+```
+// 注册事件时
+event.events = EPOLLIN | EPOLLRDHUP;
+
+// 主循环判断时
+if (event_mask & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
+    close_client(epoll_fd, fd);
+    continue;
+}
+```
+
+
+
+**逻辑解读**：
+
+1.  **注册时带上它**：告诉内核，不仅要关心“有数据可读”（`EPOLLIN`），还要关心“对方是否关闭了”（`EPOLLRDHUP`）。
+2.  **触发时**：当对方关闭连接（发送 FIN 包）时，`epoll_wait` 会返回这个事件，然后你的代码立刻调用 `close_client` 清理资源。
+
+**3. 为什么不只靠 `recv` 返回 0 来判断关闭？**
+
+你可能在想：“我直接用 `recv` 读到 0 字节，不就代表对方关闭了吗？为什么还要单独监听这个事件？”
+
+-   **效率更高**：`EPOLLRDHUP` 可以让你**提前感知**关闭事件，而不必等到下次调用 `recv`。
+-   **区分“关闭”和“无数据”**：如果没有 `EPOLLRDHUP`，当 `epoll_wait` 被唤醒时，你无法仅凭事件标志区分“对方关闭了”和“单纯没数据可读”。带上它，你可以在 `recv` 之前就知道对方已经挂断了。
+
+##### 关闭模式
+
+有两种关闭模式
+
+1.   是使用ctrl+c或者网路断线，调用close的时候---直接丢弃数据
+2.   是用户使用QUIT命令的时候，需要等待数据发完之后再断开---优雅关闭
+
+##### 一段代码
+
+```c
+void update_epoll_events(int epoll_fd, int client_fd) {
+    const auto it = clients.find(client_fd);
+    if (it == clients.end()) {
+        return;
+    }
+
+    epoll_event event{};
+    event.data.fd = client_fd;
+    event.events = EPOLLRDHUP;
+
+    if (!it->second.close_after_write) {
+        event.events |= EPOLLIN;
+    }
+
+    if (!it->second.out_buffer.empty()) {
+        event.events |= EPOLLOUT;
+    }
+
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client_fd, &event) == -1) {
+        std::cerr << "epoll_ctl MOD failed, fd=" << client_fd
+                  << ", error=" << std::strerror(errno) << '\n';
+    }
+}
+```
+
+
+
+-   **查找客户端上下文**
+
+    cpp
+
+    ```
+    const auto it = clients.find(client_fd);
+    if (it == clients.end()) return;
+    ```
+
+    
+
+    从全局（或类成员）的 `clients` 容器（通常是 `std::unordered_map`）中查找该文件描述符对应的上下文数据。如果找不到，说明连接已失效，直接返回。
+
+-   **初始化事件结构体**
+
+    cpp
+
+    ```
+    epoll_event event{};
+    event.data.fd = client_fd;
+    ```
+
+    
+
+    将 `event` 清零，并绑定对应的文件描述符，以便 epoll_wait 返回时能知道是哪个连接触发了事件。
+
+-   **核心：动态计算监听事件（按位或操作）**
+
+    -   **基础事件：`EPOLLRDHUP`**
+        这是 Linux 提供的专门检测对端关闭连接的事件（TCP 收到 FIN 包）。加上它，可以第一时间感知客户端主动断开，而不必依赖读写返回 0。
+
+    -   **条件一：监听读事件（`EPOLLIN`）**
+
+        cpp
+
+        ```
+        if (!it->second.close_after_write) {
+            event.events |= EPOLLIN;
+        }
+        ```
+
+        
+
+        只有当 `close_after_write` 标志为 `false` 时，才监听读事件。
+        *设计意图*：如果该连接即将在发完数据后关闭（半关闭状态），此时没必要再监听读事件，避免频繁触发无用的事件循环，也防止读到的数据无处处理。
+
+    -   **条件二：监听写事件（`EPOLLOUT`）**
+
+        cpp
+
+        ```
+        if (!it->second.out_buffer.empty()) {
+            event.events |= EPOLLOUT;
+        }
+        ```
+
+        
+
+        只有当应用层的输出缓冲区（`out_buffer`）**有数据待发送**时，才监听写事件。
+        *设计意图*：这是 **ET（边缘触发）模式下的标准写法**。应用层无法一次性发完所有数据时，才注册 `EPOLLOUT`，让内核在发送缓冲区有空位时通知程序继续发送。数据发完后，务必通过此函数移除 `EPOLLOUT`，避免 epoll 一直疯狂触发写就绪事件（即“忙轮询”），消耗 CPU。
+
+-   **执行修改并处理异常**
+
+    cpp
+
+    ```
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client_fd, &event) == -1) {
+        // 打印错误
+    }
+    ```
+
+    
+
+    调用 `epoll_ctl` 使用 `EPOLL_CTL_MOD` 选项修改该 fd 的监听集（假设该 fd 早已通过 `EPOLL_CTL_ADD` 添加过）。如果失败，打印错误日志（通常是因为 fd 已失效或 epoll 实例被关闭）。
+
+##### 关于哈希表
+
+```c
+auto it = clients.find(client_fd); // 假设找到了 fd=7 的那一行
+const Client& client = it->second; // 这里取出的就是 fd=7 对应的那个 Client 对象
+```
+
+##### 关于&
+
+**为什么不用&&而用&？**
+
+因为&是把两项做二进制运算，但是&&只看真值，有一些情况是不符合的
+
+对于选项宏一定要用&
