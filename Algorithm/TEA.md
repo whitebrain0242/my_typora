@@ -733,7 +733,23 @@ cur->next=list1?list1:list2;
 
 ### 二叉树
 
-二叉树有三种遍历方式：先序遍历后序遍历和中序遍历
+二叉树有三种遍历方式：先序遍历,后序遍历和中序遍历
+
+##### 话说，这三种遍历有什么区别吗？
+
+核心差异是在与**根节点的访问时间**
+
+| 遍历方式 | 根访问时机 | 信息流向     | 核心能力         | 典型题型                     |
+| -------- | ---------- | ------------ | ---------------- | ---------------------------- |
+| **前序** | 最先       | 根 → 子树    | 构建/复制/路径   | 路径和、序列化、克隆         |
+| **中序** | 中间       | 左 → 根 → 右 | **BST 有序性**   | 验证BST、第K小、恢复BST      |
+| **后序** | 最后       | 子树 → 根    | **子树信息汇总** | 高度、直径、删除树、子树统计 |
+
+-   **要路径、要复制、要序列化** → 想**前序**
+-   **BST、有序、第K个** → 想**中序**
+-   **要高度、要直径、要删树、要子树信息** → 想**后序**
+
+
 
 
 
@@ -745,13 +761,90 @@ cur->next=list1?list1:list2;
 
 ##### 二叉树的最大深度P104
 
-###### 经典递归
+###### 自顶向下和自底向上有什么区别？
 
-大概就是交给下属去做一件事，让下属一层一层返回值
+| 维度         | 自顶向下 (Top-down)                | 自底向上 (Bottom-up)                               |
+| ------------ | ---------------------------------- | -------------------------------------------------- |
+| **场景**     | 只需要路径信息                     | 需要知道左右子树的结果才能计算当前节点             |
+| **应用**     | 求路径和，路径列表，特定值是否存在 | 求树的**高度，深度，直径，节点属，最大值和最小值** |
+| **返回值**   | 通常无返回值，用外部变量收集结果   | 通常有返回值，子树结果合并给父节点                 |
+| **典型应用** | 路径、遍历、条件判断               | 高度、直径、平衡性、子树统计                       |
 
-###### lamada遍历
+那么以这一道题为例
 
-写一个lamada表达式，然后遍历记录深度，因为没有向递归那样return,然后从跟节点从上到下就好了
+###### 自底向上
+
+```c
+class Solution {
+public:
+    int maxDepth(TreeNode* root) {
+        if(!root)return 0;
+        left_depth=maxDepth(root->left);
+        right_depth=maxDepth(root->right);
+        return max(left_depth,right_depth)+1;
+    }
+};
+```
+
+先递归到底，在逐层返回，每一个节点都依赖子树的返回值
+
+###### 自顶向下
+
+```c#
+class Solution {
+public:
+    int maxDepth(TreeNode* root) {
+        int ans=0;
+        auto dfs=[&](this auto&& dfs,TreeNode*node,int depth)->void{
+            if(!node)return;
+            depth++;
+            ans=max(ans,depth);
+            dfs(node->left,depth);
+            dfs(node->right,depth);
+        };
+        dfs(root,0);
+        return ans;
+    }
+};
+```
+
+先处理当前节点，然后带着结果递归下去，用参数传递路径信息
+
+###### 模板
+
+自底向上模板
+
+```c
+def bottom_up(node):
+    if not node:
+        return 基础值  # 空树的返回值（0, None, []等）
+    
+    left = bottom_up(node.left)    # 先递归左
+    right = bottom_up(node.right)  # 再递归右
+    
+    # 用 left、right 的结果计算当前节点的结果
+    result = 合并(left, right, node.val)
+    return result
+```
+
+自顶向下
+
+```c
+def top_down(node, 路径状态):
+    if not node:
+        return
+    
+    # 1. 先处理当前节点（更新全局答案）
+    更新答案(node, 路径状态)
+    
+    # 2. 更新状态，传给子节点
+    top_down(node.left, 新状态)
+    top_down(node.right, 新状态)
+```
+
+
+
+
 
 
 
@@ -922,3 +1015,4 @@ dfs(node)=min(dfs(node.left),dfs(node.right))+1
 
 
 
+````
