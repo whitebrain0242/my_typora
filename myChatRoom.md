@@ -1948,9 +1948,7 @@ CREATE TABLE users (
     -   若验证成功，返回 `VerifyUserResult::Success`，否则 `InvalidCredentials`。
     -   任何数据库异常均返回 `Error`（并填充 `error` 字符串）。
 
-------
-
-### 安全设计亮点
+###### 安全设计亮点
 
 -   **使用预处理语句**：防止 SQL 注入。
 -   **二进制数据直接存储**：盐和哈希用 `VARBINARY`，避免字符集问题。
@@ -1960,7 +1958,81 @@ CREATE TABLE users (
 
 
 
+#### DAY16
 
+#####  数据库交互流程
+
+###### 路线一：写入/上传流程（客户端 → 服务器 → MySQL）
+
+以 **`REGISTER alice pass123`（注册新账号）** 为例：
+
+| 步骤 | 所在进程             | 函数名                                                       | 具体动作                                                     |
+| :--- | :------------------- | :----------------------------------------------------------- | :----------------------------------------------------------- |
+| 1    | **客户端**           | `main()` → `send_all()`                                      | 用户输入 `REGISTER alice pass123`，客户端通过 `send()` 把文本发到服务端 socket。 |
+| 2    | **服务端**           | `ChatServer::run()` → `epoll_wait()`                         | 服务端收到数据，触发 `EPOLLIN` 事件。                        |
+| 3    | **服务端**           | `ChatServer::handle_client_read()`                           | 从 socket `recv()` 数据，追加到 `in_buffer`，按 `\n` 切分出完整行 `"REGISTER alice pass123"`。 |
+| 4    | **服务端**           | `ChatServer::handle_command()`                               | 调用 `parse_command()` 解析出 `name="REGISTER"`，进入 `else if (command.name == "REGISTER")` 分支。 |
+| 5    | **服务端**           | `ChatServer::handle_register()`                              | 校验用户名密码格式、检查是否已登录；然后调用 `user_repository_.create_user(username, password, error)`。 |
+| 6    | **服务端（仓库层）** | `MySqlUserRepository::create_user()`                         | 调用 `PasswordHasher::create()` 生成随机盐和 PBKDF2 哈希；准备 SQL：`INSERT INTO users (...) VALUES (?, ?, ?, ?)`。 |
+| 7    | **服务端（仓库层）** | `ensure_connected()` → `prepare_statement()` → `mysql_stmt_bind_param()` → `mysql_stmt_execute()` | 执行预处理语句，把用户名、盐、哈希、迭代次数写入 MySQL。     |
+| 8    | **服务端**           | 逐层返回                                                     | 如果成功，`create_user` 返回 `Success`，`handle_register` 调用 `queue_message()` 把 `"[system] registration successful"` 放入客户端的 `out_buffer`。 |
+| 9    | **服务端**           | `ChatServer::handle_client_write()`                          | 在下一个事件循环中，通过 `send()` 把 `out_buffer` 中的成功消息发回给客户端。 |
+| 10   | **客户端**           | `main()` 中的 `recv()`                                       | 收到服务器回显的文本，打印在终端上。                         |
+
+**关键结论**：写入流程必走 **“业务校验 → 仓库层 → 预处理语句 → 提交”**。
+
+------
+
+###### 路线二：读取/下载流程（MySQL → 服务器 → 客户端）
+
+以 **`WHO`（查看在线用户列表）** 为例：
+
+**注意**：`WHO` 读取的是 **`online_users_` 内存表**（由服务端维护，不直接查 MySQL）。但如果要查 **“好友列表（`FRIENDS`）”**，它读的是服务启动时缓存的 `users_` 内存 map，**也不是实时查 MySQL**。
+
+为了让看清楚 **“真正实时查 MySQL 的读取”**，我们以 **`HISTORY_PRIVATE bob 10`（拉取私聊历史）** 为例（假设 v7.2 以后消息已迁移到 MySQL）：
+
+| 步骤 | 所在进程             | 函数名                                                       | 具体动作                                                     |
+| :--- | :------------------- | :----------------------------------------------------------- | :----------------------------------------------------------- |
+| 1    | **客户端**           | `main()` → `send_all()`                                      | 用户输入 `HISTORY_PRIVATE bob 10`，发给服务端。              |
+| 2    | **服务端**           | `ChatServer::handle_command()`                               | 路由到 `handle_private_history()`。                          |
+| 3    | **服务端**           | `ChatServer::handle_private_history()`                       | 校验登录、解析参数（`bob` 和 `10`），然后调用 `message_store_.recent_private(...)`。 |
+| 4    | **服务端**           | `InMemoryMessageStore::recent_private()`（如果是内存存储）或 `MySqlMessageRepository::load_recent_private()`（如果是 MySQL 存储） | 如果是 MySQL 存储，执行 `SELECT sender, recipient, content, created_at FROM private_messages WHERE (sender = ? AND recipient = ?) OR ... ORDER BY id DESC LIMIT ?`。 |
+| 5    | **服务端（仓库层）** | `ensure_connected()` → `mysql_query()` 或 `mysql_stmt_prepare()` → `mysql_stmt_execute()` → `mysql_store_result()` | 把数据从 MySQL 拉取到服务端内存的 `MYSQL_RES*` 结果集中。    |
+| 6    | **服务端**           | `mysql_fetch_row()` 循环                                     | 逐行取出消息内容，构造成 `ChatMessage` 对象，放进 `std::vector`。 |
+| 7    | **服务端**           | `ChatServer::handle_private_history()`                       | 把 `vector` 中的消息格式化成文本（`#123 2025-01-01 alice -> bob: hello`），调用 `queue_message()` 放入 `out_buffer`。 |
+| 8    | **服务端**           | `ChatServer::handle_client_write()`                          | 发回给客户端。                                               |
+| 9    | **客户端**           | `recv()`                                                     | 打印显示。                                                   |
+
+**关键结论**：读取流程必走 **“业务层 → 仓库层 → SQL 执行 → 结果集逐行解析 → 格式化回传”**。
+
+------
+
+###### 路线三：启动时批量加载（MySQL → 服务器内存）
+
+这是最容易被忽略的一步。服务端**不是每次查好友关系都去 MySQL**，而是**启动时一次性全部读到内存**。
+
+以 **`ChatServer::initialize()`** 加载好友关系为例：
+
+| 步骤 | 函数名                                  | 动作                                                         |
+| :--- | :-------------------------------------- | :----------------------------------------------------------- |
+| 1    | `ChatServer::initialize()`              | 调用 `load_registered_users()`。                             |
+| 2    | `ChatServer::load_registered_users()`   | 调用 `user_repository_.load_usernames(usernames, error)`。   |
+| 3    | `MySqlUserRepository::load_usernames()` | 执行 `SELECT username FROM users`，把所有用户名读进 `vector`，然后 `users_.emplace(username, UserAccount{...})` 放入服务器内存。 |
+| 4    | `MySqlFriendRepository::load_state()`   | 执行 `SELECT ... FROM friendships` 和 `SELECT ... FROM friend_requests`，填进 `state.friendships` 和 `state.pending_requests`，供 `are_friends` 查询使用。 |
+
+**关键结论**：**好友关系、账号列表**在启动时全量缓存。`WHO`、`FRIENDS`、`are_friends` 走的都是内存，**不实时查 MySQL**，只有 `HISTORY` 或 `REGISTER`/`LOGIN` 等需要持久化存储/校验的操作才实时访问数据库。
+
+------
+
+### 核心总结：函数名速查表
+
+| 动作         | 客户端函数   | 服务端网络层函数                            | 服务端业务层函数                            | 仓库层函数                                   | MySQL API 函数                                           |
+| :----------- | :----------- | :------------------------------------------ | :------------------------------------------ | :------------------------------------------- | :------------------------------------------------------- |
+| 上传（写入） | `send_all()` | `handle_client_read()` → `handle_command()` | `handle_register()` / `handle_add_friend()` | `create_user()` / `create_request()`         | `mysql_stmt_prepare` → `bind` → `execute` + `commit`     |
+| 下载（读取） | `recv()`     | `handle_client_write()`                     | `handle_public_history()`                   | `load_recent_private()` / `load_usernames()` | `mysql_query` + `mysql_store_result` + `mysql_fetch_row` |
+| 启动缓存     | 无           | 无                                          | `initialize()`                              | `load_state()` / `load_usernames()`          | 同上                                                     |
+
+**牢记这条铁律**：**客户端只发文本命令，只收文本回显；所有 SQL 查询和写入都封装在 `MySqlXxxRepository` 里，由服务端在接收到命令后调用。**
 
 
 
