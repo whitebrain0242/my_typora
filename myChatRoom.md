@@ -2024,7 +2024,7 @@ CREATE TABLE users (
 
 ------
 
-### 核心总结：函数名速查表
+###### 核心总结：函数名速查表
 
 | 动作         | 客户端函数   | 服务端网络层函数                            | 服务端业务层函数                            | 仓库层函数                                   | MySQL API 函数                                           |
 | :----------- | :----------- | :------------------------------------------ | :------------------------------------------ | :------------------------------------------- | :------------------------------------------------------- |
@@ -2036,6 +2036,382 @@ CREATE TABLE users (
 
 
 
+#### DAY17
+
+##### BLOB数据
+
+**BLOB** 是 **Binary Large OBject（二进制大对象）** 的缩写。在 MySQL 数据库中，它是一种专门用来存储**原始二进制数据**的数据类型。
+
+-   **存的是什么**：存的是**字节流**（即 `0x00` 到 `0xFF` 的任意序列）。
+-   **不做什么**：MySQL **不会**对它进行字符集转换（比如不会转 utf8），也**不会**因为里面包含 `\0` 空字符而截断它。它把数据当作“无意义的字节”原样存入、原样读出。
+
+###### `BLOB` 和 `VARBINARY` 的区别（MySQL 特有）
+
+-   **`BLOB`**：可变长，最大可达 **65KB**（`TINYBLOB` 到 `LONGBLOB` 不等），没有指定长度的语法（如 `BLOB(16)` 是无效的）。
+-   **`VARBINARY(M)`**：指定最大长度 `M`（如 `VARBINARY(16)`），限制在 1~65535 字节之间，且会占用额外的长度字节。
+
+在你的场景中，因为盐和哈希长度固定（16 和 32），用 **`VARBINARY(16)`** 和 **`VARBINARY(32)`** 是最精准、最节省空间的写法，相当于“固定长度的二进制列”。
+
+##### 事务
+
+**事务的本质是：一组必须“要么全部成功，要么全部失败”的数据库操作集合**
+
+**在你的代码中，这个“事务”只包含下面这两条写操作：**
+
+1.  **第一条 SQL**（往 `friend_requests` 表插数据）：
+
+    
+
+    ```sql
+    INSERT INTO friend_requests (sender_user_id, receiver_user_id) 
+    SELECT ... WHERE sender.username = 'alice' AND receiver.username = 'bob';
+    ```
+
+    
+
+2.  **第二条 SQL**（往 `friend_events` 表插二进制事件）：
+
+    
+
+    ```sql
+    INSERT INTO friend_events (actor_user_id, target_user_id, payload) 
+    SELECT ... WHERE actor.username = 'alice' AND target.username = 'bob';
+    ```
+
+    
+
+**“事务”就是这两条 SQL 的捆绑包**。
+数据库（MySQL）会把这俩视为 **“一个完整的任务”**。
+
+
+
+>**“事务”不是一个死的东西（不是一张表，也不是一个文件），它是一个活的状态，是你从 `begin`（起笔）到 `commit`（落款）这段时间内，MySQL 为你保留的一张“随时可以撕掉重来的草稿纸”。**
+
+
+
+###### **为什么必须要“事务”？（没有它会出什么问题？）**
+
+如果不加事务（即默认的“自动提交”模式），执行过程是这样的：
+
+1.  执行 `INSERT INTO friend_requests` → **成功！数据立刻写进硬盘了。**
+2.  执行 `INSERT INTO friend_events` → **失败了！**（比如 `protobuf_event` 太大，或者网络瞬间卡顿）。
+
+**后果**：数据库里多了一条“好友请求记录”，但缺少了对应的“审计日志”。
+你的业务逻辑（`ChatServer`）查好友请求时发现有记录，但查事件时发现没有，**数据产生不一致（脏数据）**，排错极其困难。
+
+**有了事务**：
+如果第二条 SQL 失败了，`rollback_transaction()` 会被调用，MySQL 会**瞬间把第一条 SQL 插入的数据删除掉**。
+数据库最终恢复到执行第一条 SQL 之前的“空白状态”，仿佛什么都没发生过。
+
+###### 事务”在底层到底是怎么执行的？（揭开黑盒）
+
+**事务并不是把数据直接写在硬盘上，而是写在了“草稿纸”上。**
+
+-   **`begin_transaction()`（开启）**：
+    告诉 MySQL：“从现在起，把我要改的数据先写在**内存缓存（Buffer Pool）** 和 **撤销日志（Undo Log）** 里，不要直接动硬盘里的正式数据。”
+-   **执行 SQL 期间（`INSERT`）**：
+    数据在内存里被修改了。MySQL 专门记录了一份“旧数据”在 Undo Log 里，以防万一需要撤销。
+-   **`commit_transaction()`（提交）**：
+    告诉 MySQL：“我的草稿确定了！” MySQL 立刻把修改记录写入 **Redo Log（重做日志）** 并强制刷到硬盘。
+    **此时，数据才算“永久固化”了**。即使下一秒电脑断电，重启后 MySQL 也能根据 Redo Log 把这笔修改恢复回来。
+-   **`rollback_transaction()`（回滚）**：
+    告诉 MySQL：“我反悔了！” MySQL 直接丢弃内存中的修改，然后**照着 Undo Log 里的旧数据，把内存恢复成原来的样子**。硬盘上的正式数据纹丝未动。
+
+##### SQL
+
+###### 1. 
+
+```mysql
+constexpr const char* kSql =
+        "INSERT INTO friend_events ("
+        "actor_user_id, "
+        "target_user_id, "
+        "payload"
+        ") "
+        "SELECT actor.id, target.id, ? "
+        "FROM users actor "
+        "JOIN users target ON 1 = 1 "
+        "WHERE actor.username = ? "
+        "AND target.username = ?";
+```
+
+这条 SQL 是想往 `friend_events`（好友事件）表里插一条记录。
+这条记录要包含三个东西：
+
+-   **谁干的**（操作者 ID）
+-   **对谁干的**（目标用户 ID）
+-   **干了什么事**（比如 `"ADD_FRIEND"`）
+
+2. 难点在哪？
+
+难点在于：上层业务传过来的是**用户名**（比如 `"alice"` 和 `"bob"`），但数据库存关系只认**数字 ID**（比如 `id=1` 和 `id=2`）。
+所以必须把“用户名”转换成“ID”。
+
+我们拆成三步来看：
+
+第一步：给你手里的数据起外号**
+
+
+
+```sql
+FROM users actor
+JOIN users target ON 1 = 1
+```
+
+
+
+这句话就是：**“把 users 表复制出两份，一份叫 actor（操作者），一份叫 target（目标）”**。
+
+第二步：在复制品里筛出你要的那两个人**
+
+```
+WHERE actor.username = ? AND target.username = ?
+```
+
+
+
+比如你绑定的参数是 `actor = 'alice'`，`target = 'bob'`，那这里的结果就是：
+
+| actor.id | actor.username | target.id | target.username |
+| :------- | :------------- | :-------- | :-------------- |
+| **1**    | alice          | **2**     | bob             |
+
+第三步：把筛出来的数据插进去**
+
+sql
+
+```
+SELECT actor.id, target.id, ?
+```
+
+
+
+就是把上面这一行里面的 `1`、`2`、和事件类型（`payload`）一起插进 `friend_events` 表。
+
+###### 2.
+
+```sqlite
+constexpr const char* kFriendRequestsSql =
+        "CREATE TABLE IF NOT EXISTS "
+        "friend_requests ("
+        "sender_user_id BIGINT UNSIGNED "
+        "NOT NULL,"
+        "receiver_user_id BIGINT UNSIGNED "
+        "NOT NULL,"
+        "created_at TIMESTAMP(3) NOT NULL "
+        "DEFAULT CURRENT_TIMESTAMP(3),"
+        "PRIMARY KEY ("
+        "sender_user_id, receiver_user_id"
+        "),"
+        "KEY idx_friend_requests_receiver "
+        "(receiver_user_id, created_at),"
+        "CONSTRAINT fk_friend_requests_sender "
+        "FOREIGN KEY (sender_user_id) "
+        "REFERENCES users(id) "
+        "ON DELETE CASCADE,"
+        "CONSTRAINT fk_friend_requests_receiver "-- 强制要求 sender_user_id 必须存在于 users 表中
+        "FOREIGN KEY (receiver_user_id) "
+        "REFERENCES users(id) "
+        "ON DELETE CASCADE,"-- 如果发送者用户被删除了，所有他发出去的申请会自动删除
+        "CONSTRAINT chk_friend_request_users "-- 从根本上禁止用户给自己发好友申请
+        "CHECK ("
+        "sender_user_id <> receiver_user_id"
+        ")"
+        ") ENGINE=InnoDB";
+```
+
+###### 3.
+
+```sql
+constexpr const char* kSql =
+        "SELECT event.id, event.payload "
+        "FROM friend_events event "
+        "JOIN users current_user "-- 从users表中查处用户的数字ID
+        "ON current_user.username = ? "
+        
+        "WHERE event.actor_user_id = "
+        "current_user.id "
+        "OR event.target_user_id = "
+        "current_user.id "-- 不管是发送者还是接受者都查询
+        "ORDER BY event.id DESC "-- 事件ID降序排列
+        "LIMIT ?";-- 查询行数
+```
+
+FROM后面是两张表，和为他们起的别名
+
+ON后面的是连接条件，这两个表应该怎么关联在一起，从 `users` 表里，找出 `username` 字段等于我传入的那个字符串（比如 `'alice'`）的那一行，把它作为 `current_user`。”
+
+###### 4.
+
+```c
+    constexpr const char* kSql =
+        "DELETE friendship "
+        "FROM friendships friendship "
+        "JOIN users actor ON 1 = 1 "
+        "JOIN users target ON 1 = 1 "
+        "WHERE actor.username = ? "
+        "AND target.username = ? "
+        "AND friendship.user_id_low = "
+        "LEAST(actor.id, target.id) "
+        "AND friendship.user_id_high = "
+        "GREATEST(actor.id, target.id)";
+```
+
+1. 为什么要这样写？（核心痛点）
+
+在你的 `friendships` 表设计中，为了确保“好友关系”的唯一性，你强制规定：
+
+-   **`user_id_low`** 存放 **较小的** 用户 ID
+-   **`user_id_high`** 存放 **较大的** 用户 ID
+
+这样做的好处是：不管 A 加 B，还是 B 加 A，存进数据库的都是 `(low_id, high_id)` 这一种顺序，不会出现 `(1,2)` 和 `(2,1)` 两条重复数据。
+
+但是，当业务层（比如 `REMOVE_FRIEND alice bob`）传过来的是**用户名**时，你面临两个问题：
+
+1.  要把 `"alice"` 和 `"bob"` 变成 `id`。
+2.  要知道 `alice` 和 `bob` 谁的 `id` 更小，才能去匹配 `user_id_low`。
+
+传统笨办法需要 **3 次 SQL 交互**：
+
+1.  查 alice 的 id
+2.  查 bob 的 id
+3.  在 C++ 里用 `if` 判断大小，然后拼 SQL `DELETE ... WHERE low = ? AND high = ?`
+
+2. 这条 SQL 如何“一步到位”？
+
+它利用 `JOIN` 和 `LEAST/GREATEST` 函数，把上面 3 步**合并成了 1 步**：
+
+-   **`JOIN users actor ON 1 = 1` 和 `JOIN users target ON 1 = 1`**
+    先把 `users` 表复制成两份，通过 `WHERE actor.username = ? AND target.username = ?` 精准锁定那两个用户的行。
+-   **`LEAST(actor.id, target.id)` 和 `GREATEST(actor.id, target.id)`**
+    直接在 SQL 里计算出谁小谁大，无需 C++ 代码插手。然后用这两个计算结果去匹配 `friendships` 表中的 `user_id_low` 和 `user_id_high`。
+
+3. 完整的执行逻辑拆解
+
+假设数据库里有：
+
+-   `alice` 的 `id = 10`
+-   `bob` 的 `id = 5`
+
+当你执行 `REMOVE_FRIEND alice bob` 并绑定这两个用户名时，SQL 内部的计算过程是这样的：
+
+| 步骤 | 逻辑                                        | 结果               |
+| :--- | :------------------------------------------ | :----------------- |
+| 1    | 根据 `actor.username` 查出 `actor.id`       | `10`               |
+| 2    | 根据 `target.username` 查出 `target.id`     | `5`                |
+| 3    | 计算 `LEAST(10, 5)`                         | **`5`**            |
+| 4    | 计算 `GREATEST(10, 5)`                      | **`10`**           |
+| 5    | 去 `friendships` 表里找 `low=5 AND high=10` | 找到这条记录并删除 |
+
+4. 致命陷阱（必须注意）
+
+和之前的 `INSERT` 一样，这条 SQL **不会因为用户不存在而报错**。如果 `alice` 或 `bob` 根本不在 `users` 表里，`JOIN` 查不出数据，**这条 SQL 依然“成功执行”，但影响行数是 0**。
+
+因此，你的 C++ 代码**必须**检查 `mysql_stmt_affected_rows()`：
+
+```
+if (mysql_stmt_affected_rows(statement.get()) != 1) {
+    error = "User does not exist or they are not friends";
+    return false;
+}
+```
+
+
+
+###### 5.
+
+```sql
+CREATE TABLE IF NOT EXISTS messages (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    message_type TINYINT UNSIGNED NOT NULL,
+    sender_username VARCHAR(20) NOT NULL,
+    recipient_username VARCHAR(20) NULL,
+    created_at_unix_ms BIGINT NOT NULL,
+    payload LONGBLOB NOT NULL,
+    PRIMARY KEY (id),
+    INDEX idx_messages_public (message_type, id),
+    INDEX idx_messages_sender_recipient (
+        message_type,
+        sender_username,
+        recipient_username,
+        id
+    ),
+    INDEX idx_messages_recipient_sender (
+        message_type,
+        recipient_username,
+        sender_username,
+        id
+    ),
+    CONSTRAINT fk_message_sender
+        FOREIGN KEY (sender_username) REFERENCES users(username)
+        ON DELETE CASCADE,
+    CONSTRAINT fk_message_recipient
+        FOREIGN KEY (recipient_username) REFERENCES users(username)
+        ON DELETE CASCADE,
+    CONSTRAINT chk_message_type CHECK (message_type IN (1, 2)),
+    CONSTRAINT chk_message_recipient CHECK (
+        (message_type = 1 AND recipient_username IS NULL) OR
+        (message_type = 2 AND recipient_username IS NOT NULL)
+    )
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+```
+
+2. 核心字段拆解：为什么存这些？
+
+-   **`id`**
+    自增主键。**物理排序依据**。不管时间准不准，`id` 越大的消息一定是越晚写入的。在查询“最近 N 条消息”时，直接用 `ORDER BY id DESC` 性能最快，不需要额外的时间索引。
+-   **`message_type TINYINT UNSIGNED`**
+    消息类型（1=公共消息，2=私聊消息）。之所以用 `TINYINT`（1字节）而不存字符串，是为了节省存储空间和索引体积。
+-   **`sender_username` 和 `recipient_username`**
+    直接存用户名（字符串），而不是存用户 ID。
+    这是一个**反常规设计**。大多数系统会存 ID 以节省空间，但这里存用户名有一个巨大好处：**查询历史记录时，不需要 JOIN `users` 表去查名字，直接读出来就能用**，减少了联表查询的开销。代价是用户名如果改了，历史消息里的名字不会变（但用户名通常不允许修改，所以没问题）。
+-   **`created_at_unix_ms BIGINT`**
+    存 **Unix 毫秒时间戳**（整数），而不是 MySQL 的 `TIMESTAMP`。
+    好处：不受时区影响，不受 2038 年影响，C++ 的 `std::chrono` 可以直接转成这个数字，省去了 `TIMESTAMP` 格式化转换的开销。
+-   **`payload LONGBLOB`**
+    这是整张表**最核心、最灵活**的设计。
+    没有定义 `content`、`image_url`、`file_size` 这些乱七八糟的列，而是把所有消息内容**打包成一个 Protobuf 二进制流**塞进 `LONGBLOB`。
+    为什么？因为聊天消息的格式会变（以后可能加表情、引用回复、@提醒、语音），如果加一列就要改一次表结构，太麻烦。用 `payload` 存 Protobuf，**消息格式的升级完全由代码控制，数据库不需要跟着改**。
+
+3. 约束：让数据库当“警察”，拦截非法数据
+
+-   **`chk_message_type CHECK (message_type IN (1, 2))`**
+    限制消息类型只能是 1 或 2。如果 C++ 代码出了 BUG，想插入一个 3，数据库会直接拒绝，不会污染数据。
+-   **`chk_message_recipient CHECK (...)`**
+    这是这张表**最惊艳的约束**。它强制要求：
+    -   如果 `message_type = 1`（公共消息），`recipient_username` **必须为 NULL**。
+    -   如果 `message_type = 2`（私聊消息），`recipient_username` **必须不为 NULL**。
+        这个约束在数据库层面**硬性锁死了“公共消息没有接收者，私聊必须有接收者”的业务规则**。即使你写 C++ 时忘了赋值，MySQL 也会报错，相当于多了一道安全防线。
+
+4. 外键：用户注销了，消息怎么办？
+
+-   **`fk_message_sender`** 和 **`fk_message_recipient`**
+    引用了 `users(username)`，并且 `ON DELETE CASCADE`。
+    意思是：如果用户注销（`users` 表删除了该行），**他发的所有消息和他收到的所有私聊，都会被 MySQL 自动删除**。
+    这保证了数据库里不会留下“查无此人”的孤儿消息，省去了你写 C++ 代码去清理的麻烦。
+
+5. 索引：为了让查询“飞”起来
+
+你的内存消息存储只有几百条，不需要索引。但现在消息要存硬盘，可能有几百万条，所以索引是关键。
+
+-   **`idx_messages_public (message_type, id)`**
+    专门为 `FRIEND_EVENTS`（实际上应该是 `HISTORY_PUBLIC 20`）命令设计的。
+    查询条件是 `WHERE message_type = 1 ORDER BY id DESC LIMIT 20`，走这个索引直接定位到公共消息的尾部，瞬间完成。
+-   **`idx_messages_sender_recipient (message_type, sender_username, recipient_username, id)`**
+    专门为查询 **“我发给某个人的历史消息”** 设计的。
+    查询条件是 `WHERE message_type = 2 AND sender_username = 'alice' AND recipient_username = 'bob' ORDER BY id DESC`，索引直接命中三列，无须回表。
+-   **`idx_messages_recipient_sender (message_type, recipient_username, sender_username, id)`**
+    专门为查询 **“某人发给我的历史消息”** 设计的（方向和上面相反）。
+    因为私聊是双向的，你不能保证客户端的查询方向，所以建了两个相反方向的索引，**无论从哪个角度查，都能用上索引**。
+
+6. 存储引擎和字符集
+
+-   **`ENGINE=InnoDB`**
+    支持事务、支持外键、支持行级锁，高并发下比 MyISAM 稳定得多。
+-   **`DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`**
+    表默认字符集是 `utf8mb4`（支持表情符号），排序规则是 `utf8mb4_bin`（区分大小写）。
+    但是，`sender_username` 和 `recipient_username` 字段**必须**沿用 `users` 表的 `ascii` 字符集，否则外键会报错（因为字符集不一致）。这一点是你建表时需要留意的，但属于物理实现细节，不影响你理解它的逻辑设计。
 
 
 
@@ -2068,3 +2444,121 @@ CREATE TABLE users (
 
 
 
+
+
+
+##### 函数
+
+###### ROLLBACK
+
+```c#
+//取消当前事务中从BEGIN以来执行d所有未提交的数据库修改，让数据库回到事务开始的状态
+void MySqlFriendRepository::rollback_transaction() {
+    if (connection_ != nullptr) {
+        mysql_rollback(connection_);//服务器向MYSQL发送一个ROLLBACK包
+    }
+}
+```
+
+ MySQL 服务器收到 `ROLLBACK` 后干了什么？
+
+1.  **丢弃缓冲池修改**：把之前 `mysql_stmt_execute` 写入 InnoDB 内存缓冲池（Buffer Pool）但尚未落盘的数据，全部清除。
+2.  **撤销 undo log**：利用 InnoDB 的 undo 日志，把已经被修改但尚未提交的数据行，恢复到事务开始前的旧值（比如删除 `friend_requests` 临时插入的记录）。
+3.  **释放行锁**：释放之前 `INSERT` 或 `SELECT ... FOR UPDATE` 时持有的行锁或间隙锁，让其他事务（比如其他客户端）能够继续操作这些数据。
+4.  **丢弃 Redo Log**：清空该事务在 redo log 中生成的待持久化记录，确保这些修改永远不会被刷入 `.ibd` 物理文件。
+
+
+
+只要你看到 `rollback_transaction()`，就说明**前面某一步出错了**
+
+```c
+if (!statement) {
+    rollback_transaction();  // ✅ SQL 预处理失败，撤销一切
+    return Error;
+}
+
+if (mysql_stmt_bind_param(...) != 0) {
+    rollback_transaction();  // ✅ 参数绑定失败，撤销一切
+    return Error;
+}
+
+if (mysql_stmt_execute(...) != 0) {
+    rollback_transaction();  // ✅ 插入 friend_requests 失败（比如网络超时），撤销一切
+    return Error;
+}
+
+if (affected_rows != 1) {
+    rollback_transaction();  // ✅ 用户不存在，撤销“假装插入”的假动作
+    return NotFound;
+}
+
+if (!insert_event(...)) {
+    rollback_transaction();  // ✅ 事件日志写失败了，撤销之前插入的请求记录
+    return Error;
+}
+
+if (!commit_transaction(error)) {
+    rollback_transaction();  // ✅ 提交指令发出去失败了，强制撤销
+    return Error;
+}
+```
+
+###### COMMIT
+
+```c
+//把所有已经执行成功的SQL修改，持久化到硬盘文件里，让数据尘埃落地
+bool MySqlFriendRepository::commit_transaction(
+    std::string& error
+) {//服务起向MYSQL发送一各COMMIT指令包，0提交成功，非0失败
+    if (mysql_commit(connection_) != 0) {
+        error =
+            "failed to commit transaction: " +
+            std::string(mysql_error(connection_));
+        return false;
+    }
+
+    return true;
+}
+```
+
+ MySQL 服务器收到 `COMMIT` 后干了什么？（深入一步）
+
+1.  **写入 Redo Log（重做日志）**：把事务修改的数据页变更，从内存日志缓冲区强制刷写到磁盘的 `ib_logfile` 文件中。这是 **WAL（Write-Ahead Logging）** 机制的核心——**先写日志，后写数据**。
+2.  **标记事务为已提交**：在 `binlog`（二进制日志）和 Redo Log 中写入 `COMMIT` 标记，表示该事务已成功结束。
+3.  **释放行锁（Row Locks）**：释放 `INSERT` 或 `SELECT ... FOR UPDATE` 持有的行锁和间隙锁，让其他事务（其他客户端）能够查询或修改这些数据行。
+4.  **（异步）刷脏页**：InnoDB 后台线程会异步地把内存缓冲池（Buffer Pool）中对应的脏数据页，写入 `.ibd` 数据文件。**注意**：这一步通常是异步的，但有了步骤 1 的 Redo Log，即使数据库在数据页落盘前崩溃，重启后也能通过 Redo Log 恢复已提交的数据。
+
+######  START TRANSACTION
+
+MySQL 服务器收到 `START TRANSACTION` 后干了什么？
+
+1.  **关闭自动提交（Autocommit）**：MySQL 默认每条 SQL 都自动提交（`autocommit=1`）。执行 `START TRANSACTION` 后，当前会话的自动提交被临时关闭，直到遇到 `COMMIT` 或 `ROLLBACK`。
+2.  **分配事务 ID**：InnoDB 引擎为这个事务分配一个唯一的事务 ID（`TRX_ID`），用于 MVCC（多版本并发控制）和 Redo/Undo 日志跟踪。
+3.  **记录 Undo Log 起点**：在 Undo 日志中标记一个“保存点”，以便后续 `ROLLBACK` 时能精确恢复到事务开始前的状态。
+4.  **获取必要的锁**：根据后续 SQL 的执行情况，逐步获取行锁或表锁（但此时还没有锁定任何行，只是准备好了锁机制）。
+
+为什么不能省略这一步？
+
+如果直接执行 `INSERT` 而不调用 `begin_transaction`：
+
+-   **默认自动提交**：每条 `INSERT` 执行后，MySQL 会立即将其持久化到硬盘。如果第二条 SQL（`insert_event`）失败，第一条 `INSERT INTO friend_requests` 已经写死了，无法撤销，导致**数据不一致**（有了请求记录但没有事件日志）。
+-   **无法批量回滚**：没有事务包裹，`rollback` 就无法同时撤销两条 SQL 的修改。
+
+而有了 `begin_transaction`，你才能用 `commit` 和 `rollback` 精确控制两条 SQL 的原子性。
+
+###### PING
+
+```c++
+if (
+        connection_ != nullptr &&
+        mysql_ping(connection_) == 0//这个函数
+    ) {
+        return true;
+    }
+```
+
+-   `mysql_ping(connection_) == 0`：`mysql_ping` 函数向服务器发送一个“心跳”包，如果服务器响应且连接正常，返回 0；如果连接已断开或服务器无响应，返回非 0。
+
+##### 存储用户名
+
+大多数系统会存 ID 以节省空间，但这里存用户名有一个巨大好处：**查询历史记录时，不需要 JOIN `users` 表去查名字，直接读出来就能用**，减少了联表查询的开销。代价是用户名如果改了，历史消息里的名字不会变（但用户名通常不允许修改，所以没问题）。
