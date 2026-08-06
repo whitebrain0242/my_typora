@@ -2578,11 +2578,174 @@ if (
 -   **抽象观察者（Observer）**：
     -   声明一个纯虚函数 `virtual void update() = 0;`。
     -   该函数作为通知入口点，由被观察者在状态变更时调用。
+    
 -   **具体观察者（Concrete Observer）**：
     -   继承自 `Observer`，实现 `update()` 方法。
     -   该方法内部定义针对被观察者状态变化的响应逻辑。
+    
 -   **抽象/具体被观察者（Observable / Subject）**：
     -   持有 **观察者抽象接口的指针容器**，即 `std::vector<Observer*> observers_`。
+    
     -   提供注册接口 `register_(Observer* x)`，将观察者指针加入容器。
+    
     -   提供注销接口 `unregister_(Observer* x)`，将观察者指针从容器移除。
-    -   提供通知接口 `notifyObservers()`，该函数遍历容器，对每个元素执行 `x->update()`。
+    
+    -   ##### 提供通知接口 `notifyObservers()`，该函数遍历容器，对每个元素执行 `x->update()`。
+
+
+
+
+
+
+
+#### DAY19
+
+##### 为什么main函数中经常用try-catch？
+
+if-else：经常用在处理业务代码的时候，都是一些可预期的错误，轻量级
+
+try-catch：用在main里，来处理预期外的错误。因为此时发生里系统不可预期的**重量级**错误，程序状态已经不可靠，就需要强制中断当前流程，向上抛catch
+
+
+
+##### `(void)::signal(SIGPIPE, SIG_IGN);`
+
+增加SIG_IGN信号，意在如果对方已经关闭了读端，那么操作系统会向进程发送一个SIGPIPE信号，会终止进程
+
+增加这个信号之后，就不会直接杀死进程，而是返回错误码
+
+前面的（void）就是说不接受这个有返回值的函数，强制转换成空函数
+
+---
+
+
+
+##### **One Loop Per Thread**
+
+###### 1. 它解决了什么核心痛点？（Why）
+
+在多线程网络编程中，如果多个线程同时操作一个 TCP 连接（比如线程A读，线程B写），就必然涉及**互斥锁（Mutex）**。锁会带来两个致命问题：
+
+-   **上下文切换开销**：线程抢锁失败会被挂起，触发昂贵的系统调用。
+-   **复杂的心智负担**：你第一章读到的“对象销毁竞态”、“死锁”，全都是多线程同时触碰同一份资源引起的。
+
+**One Loop Per Thread 的策略是：**
+**“一个 TCP 连接（`TcpConnection`）从出生到死亡，所有读写操作（包括上层业务回调），都必须固定由同一个线程（同一个 EventLoop）来执行。”**
+
+这样就是串行执行，而不是并行执行，完美避开了竞态情况的出现
+
+------
+
+###### 2. 它的物理架构：主从 Reactor（Main-Reactor & Sub-Reactor）
+
+在你那套完整代码中，`server_main.cpp` 和 `EventLoopThreadPool` 实现的就是标准的 **主从 Reactor** 模型：
+
+-   **主 Reactor（MainReactor）**：
+    -   只有一个线程（就是 `main` 函数所在的线程，`EventLoop mainLoop`）。
+    -   它只负责一件事：`Acceptor` 监听倾听端口，接受新连接（`accept`）。
+    -   收到新 socket 后，它绝不自己处理，而是把它**分发**给下面的 SubReactor。
+-   **从 Reactor（SubReactor）**：
+    -   通常有多个线程（比如 `workerThreads = 4`），每个线程拥有自己独立的 `EventLoop` 实例。
+    -   它们负责所有已建立连接的 I/O 读写、定时器、以及业务回调。
+
+**对应代码证据：**
+
+
+
+```cpp
+// server_main.cpp
+TcpServer tcpServer(&mainLoop, listenAddress, "chat");
+tcpServer.setThreadNum(workerThreads); // 设置 4 个 SubReactor 线程
+```
+
+
+
+```cpp
+// TcpServer::newConnection (连接分发)
+EventLoop* ioLoop = threadPool_->getNextLoop(); // 轮询（Round-Robin）选一个 SubReactor
+TcpConnectionPtr conn = std::make_shared<TcpConnection>(ioLoop, ...); 
+ioLoop->runInLoop([conn] { conn->connectEstablished(); }); // 把连接交给那个线程
+```
+
+
+
+------
+
+###### 3. 内部机制：EventLoop 的死循环在做什么？
+
+每个 SubReactor 线程都在执行 `EventLoop::loop()`，这是个永远不会退出的 `while` 循环。它的核心工作可以拆解为 3 步（对应 `EventLoop.cpp`）：
+
+1.  **阻塞轮询（Poller）**：调用 `epoll_wait`（或 `poll`）挂在操作系统上。如果没有任何网络事件，该线程就在这里休眠，**不占用 CPU**。
+2.  **事件分发（Channel）**：当 epoll 返回活跃的 socket 列表（`activeChannels_`）时，`loop` 会遍历这些 `Channel`，并调用 `channel->handleEvent()`。这一步会触发你注册的 `onMessage` 等回调。
+3.  **执行跨线程任务（Pending Functors）**：这是 One Loop Per Thread 的“后门”。调用 `doPendingFunctors()` 执行其他线程交给它的任务（比如发送数据）。
+
+------
+
+###### 4. 如何实现“跨线程唤醒”？（最精彩的部分）
+
+问题来了：如果 SubReactor 线程正阻塞在 `epoll_wait` 上，**别的线程（比如主线程）想让它发送数据，怎么叫醒它？**
+
+答案就在 `EventLoop` 里的 **`wakeupFd_`（eventfd）**。
+
+-   主线程调用 `conn->send()`，因为不在 I/O 线程，它会调用 `loop_->runInLoop()`。
+-   `runInLoop` 把发送任务封装成 `Functor`，塞进该 SubReactor 的 `pendingFunctors_` 队列里。
+-   随后，往该 SubReactor 的 `wakeupFd_` 写入一个字节（`EventLoop::wakeup()`）。
+-   SubReactor 正阻塞在 `epoll_wait`，但 `wakeupFd_` 也是它监听的 Channel 之一。收到这个字节，`epoll_wait` 立即返回，线程被激活。
+-   线程随后执行 `doPendingFunctors()`，把队列里的发送任务执行掉。
+
+**这意味着什么？** 这套机制保证了：**所有的 I/O 操作（`sendInLoop`、`handleRead`）永远在同一个线程内部执行，根本不需要加锁！**
+
+1.   首先是线程wait之前都会把一个特殊的wakeupfd加进去
+2.   当主线程想向客户端发消息的时候，会把消息放进子线程的pendingfunctor里面
+3.   此时虽然消息放进去了，但是线程仍然在沉睡，这个时候需要向wakeupfd写一个字节进去，这个时候子线程就会苏醒
+4.   子线程苏醒后先把那个字节读取出来之后，再处理真正的peningfuctor,此时会向客户端发送消息
+
+
+
+##### 前向声明
+
+`class TcpConnection;`（注意后面是分号，没有花括号）。这行代码的作用是**提前告诉编译器：“有一个叫 `TcpConnection` 的类存在，你先记住这个名字，至于它里面有什么（成员变量和函数），我晚点再告诉你。”**
+
+###### 如果没有前向声明，会发生什么灾难？（循环依赖）
+
+假设你**不写** `class TcpConnection;`，而是直接 `#include "TcpConnection.h"`，会发生什么？
+
+-   `TcpServer.h` 包含 `TcpConnection.h`。
+-   `TcpConnection.h` 又需要包含 `TcpServer.h`（因为连接断开时，需要回调 `TcpServer` 的删除函数）。
+-   结果：`TcpServer.h` -> `TcpConnection.h` -> `TcpServer.h` -> ... 无限循环。
+-   编译器为了保护自己，会报错：`#include nested too deeply`（头文件嵌套过深）。
+
+**前向声明解决了这个问题**：
+
+-   在 `TcpServer.h` 中，我不需要知道 `TcpConnection` 里面有什么，我只需要存它的智能指针。所以我只写 `class TcpConnection;`。
+-   在 `TcpServer.cpp`（实现文件）中，我再 `#include "TcpConnection.h"`，此时编译器才去查看 `TcpConnection` 的完整定义。
+
+注意到文件开头的两行了吗？
+
+
+
+```cpp
+class Buffer;
+class TcpConnection;
+```
+
+这是前向声明（你刚学的！）。这里没有 `#include "TcpConnection.h"`，因为如果包含了，`Callbacks.hpp` 就会依赖具体实现。而通过 `using TcpConnectionPtr = std::shared_ptr<TcpConnection>;`，编译器只需要知道 `TcpConnection` 是个合法的类名就够了，不需要知道它占多少内存。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
