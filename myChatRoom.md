@@ -2731,7 +2731,33 @@ class TcpConnection;
 
 这是前向声明（你刚学的！）。这里没有 `#include "TcpConnection.h"`，因为如果包含了，`Callbacks.hpp` 就会依赖具体实现。而通过 `using TcpConnectionPtr = std::shared_ptr<TcpConnection>;`，编译器只需要知道 `TcpConnection` 是个合法的类名就够了，不需要知道它占多少内存。
 
+#### DAY20
 
+##### eventfd
+
+###### 1. `eventfd` 是什么？（技术定义）
+
+-   `eventfd` 是 Linux 内核提供的一种特殊文件描述符。
+-   支持两种操作：
+    -   **写入（`write`）**：向计数器中**增加值**（比如写入 `1`，计数器 +1）。
+    -   **读取（`read`）**：读取计数器的值，并将其**重置为 0**（阻塞模式若无值可读会等待）。
+
+------
+
+###### 2. 在 `EventLoop` 中它怎么用？（解决什么问题）
+
+在 Reactor 模型中，工作线程大部分时间阻塞在 `epoll_wait` 上。**如果主线程想把一个新客户端（`client_fd`）分配给该工作线程，必须让工作线程从 `epoll_wait` 中“醒”过来，并执行任务队列里的操作。**
+
+**实现流程**：
+
+1.  **初始化**：`EventLoop` 构造函数调用这个函数，获得一个 `wakeupFd_`。
+2.  **注册**：`EventLoop` 将这个 `wakeupFd_` 封装成一个 `Channel`，注册到自己的 `epoll` 中，监听 `EPOLLIN` 事件。
+3.  **跨线程唤醒（主线程 -> 工作线程）**：
+    -   主线程调用 `workerLoop->queueInLoop(callback)`，把任务放入工作线程的任务队列。
+    -   主线程立即执行 `::write(wakeupFd_, &one, sizeof(one))`（向 `eventfd` 写入 `1`）。
+4.  **工作线程响应**：
+    -   工作线程原本阻塞在 `epoll_wait`，现在 `epoll` 检测到 `wakeupFd_` 可读，立即返回。
+    -   工作线程调用 `wakeupFd_` 对应的 `Channel::handleEvent()`，读取 `eventfd` 的值（清空计数器），然后执行任务队列里的所有回调
 
 
 
