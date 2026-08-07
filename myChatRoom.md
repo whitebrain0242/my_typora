@@ -2763,9 +2763,9 @@ class TcpConnection;
 
 
 
+##### **`noexcept`**
 
-
-
+承诺这个函数**绝对不会抛出任何异常**
 
 
 
