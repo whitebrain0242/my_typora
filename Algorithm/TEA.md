@@ -979,25 +979,85 @@ dfs(node)=min(dfs(node.left),dfs(node.right))+1
 
 2.计算左子树高度和右子树高度，如果高度是-1就层层向上传递-1,表示出错，或者是相差的值大于1,也返回-1,最后返回左子树和右子树的更大值加一，给上级传递使用
 
-3.最后传入跟节点看是不是等于-1
+3.最后传入跟节点看是不是等于-1\
 
 
 
+#### 二叉搜索树
+
+什么是二叉搜索树？
+
+就是左子树比节点值小，右子树比节点值大的二叉树
+
+##### 验证二叉搜索树P98
+
+![img](file:////home/white/.config/QQ/nt_qq_fa6f8ae2d2dd591655d689996a896030/nt_data/Pic/2026-08/Ori/0e728f82bc624f23b56bacae3081071e.jpg)
+
+###### 前序遍历
+
+对于左子树的递归，将右边界修改为节点值
+
+对于右子树的递归，将左边界修改为节点值
+
+```c++
+class Solution {
+public:
+    bool isValidBST(TreeNode* root,long long left=LLONG_MIN,long long right=LLONG_MAX) {
+        if(!root)return true;
+        long long x=root->val;
+        return left<x&&right>x&&isValidBST(root->left,left,x)&&isValidBST(root->right,x,right);
+    }
+};
+```
 
 
 
+###### 中序遍历
+
+我们按照中序遍历出来的数组一定是严格递增的，那么如果我们要判断一个二叉树是不是二叉搜索树，只需要证明他的当前节点值是不是比前一个值小，我们维护一个上一个的节点值就好了
+
+```c++
+class Solution {
+public:
+    long long pre=LLONG_MIN;
+    bool isValidBST(TreeNode* root) {
+        if(!root)return true;
+        if(!isValidBST(root->left))return false;
+        if(root->val<=pre)return false;
+        pre=root->val;
+        return isValidBST(root->right);
+    }
+};
+```
+
+###### 后序遍历
+
+![img](file:////home/white/.config/QQ/nt_qq_fa6f8ae2d2dd591655d689996a896030/nt_data/Pic/2026-08/Ori/b0d957eec7d1af853e35c44bcd1bd338.jpg)
 
 
 
+前序遍历是从上往下传，那么后序遍历就是从下往上传
 
+先获取左右子树的范围，然后判断当前节点的值是否小于左子树的最大值或者是大于右子树的最小值，这些是错误情况
 
-
-
-
-
-
-
-
+```c
+class Solution {
+public:
+    pair<long long ,long long>dfs(TreeNode*node){
+        if(!node)return {LLONG_MAX, LLONG_MIN};
+        auto [l_min,l_max]=dfs(node->left);
+        auto [r_min,r_max]=dfs(node->right);
+        long long x=node->val;
+        if(x<=l_max||x>=r_min){
+            return {LLONG_MIN, LLONG_MAX};
+        }
+        return {min(l_min,x),max(r_max,x)};
+    }
+    bool isValidBST(TreeNode* root) {
+        return dfs(root).second!=LLONG_MAX;
+    }
+};
+```
 
 
 

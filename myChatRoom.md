@@ -2767,9 +2767,438 @@ class TcpConnection;
 
 承诺这个函数**绝对不会抛出任何异常**
 
+#### DAY21
+
+##### move
+
+为什么在初始化列表中有一些变量是直接赋值的？但是有一些需要move转移所有权
+
+这是因为有一些是指针，存的是内存地址，有一些是堆上的内存，比如说数组，推上的内存比较大所以需要move,只交换了几个指针和整数，没有堆内存分配，复杂度低
 
 
 
+##### acceptor
+
+```c++
+acceptor_(std::make_unique<Acceptor>(loop, listenAddress)),
+```
+
+###### 创建指针
+
+```c#
+acceptor_ = std::make_unique<Acceptor>(loop, listenAddress);
+```
+
+| 优势           | 详细说明                                                     |
+| :------------- | :----------------------------------------------------------- |
+| **异常安全**   | 如果 `Acceptor` 构造函数抛出异常，`std::make_unique` 能保证**绝对不泄漏原始指针**。而 `new Acceptor` + `unique_ptr` 构造之间，若发生异常，可能导致内存泄漏。 |
+| **简洁性**     | 不需要重复写类型名 `Acceptor`（只需写一次），避免了代码冗长和类型不匹配的错误。 |
+| **性能微优化** | 在某些极端场景下，它避免了 `new` 和 `unique_ptr` 构造函数之间的临时指针存储开销（虽然现代编译器优化得很好，但语义上更干净）。 |
+
+它就是把 `new` 出来的裸指针**立即托管**给 `unique_ptr`，确保从对象诞生的第一刻起，就有人负责它的生死。
+
+###### 为什么是unique_ptr？
+
+1.   acceptor代表一个监听套接字，进程中只能有一个acceptor负责监听端口，并且也不能复制（像sharedptr那样
+2.   智能指针自动回收资源，RAll
+3.   这个acceptor的生命周期完全由tcpserver管理，其他人无权管理
+
+
+
+#### DAY22
+
+##### cmake
+
+###### 1. 基础环境配置（开头三板斧）
+
+
+
+```cmake
+cmake_minimum_required(VERSION 3.16)   # 锁定最低版本，防止老版本特性不支持
+project(chatroom_v8_0 LANGUAGES CXX)   # 项目名，并声明只用 C++（加快解析）
+```
+
+
+
+-   **设置 C++ 标准**：
+
+    
+
+    ```cmake
+    set(CMAKE_CXX_STANDARD 17)            # 使用 C++17
+    set(CMAKE_CXX_STANDARD_REQUIRED ON)   # 如果编译器不支持 C++17 则报错
+    set(CMAKE_CXX_EXTENSIONS OFF)         # 禁止使用 gcc/clang 特有扩展（保持跨平台）
+    ```
+
+    
+
+------
+
+###### 2. 查找外部依赖（找包）
+
+CMake 不会自动识别你系统里的库，必须显式查找。
+
+-   **找 MySQL（通过 pkg-config）**：
+
+    
+
+    ```cmake
+    find_package(PkgConfig REQUIRED)          # 先启用 pkg-config 工具
+    pkg_check_modules(MYSQL REQUIRED IMPORTED_TARGET mysqlclient)
+    ```
+
+    
+
+    这里 `IMPORTED_TARGET` 会生成一个名为 `PkgConfig::MYSQL` 的 CMake 目标，后续直接链接它即可。
+
+-   **找 OpenSSL 和 线程库**：
+
+    
+
+    ```cmake
+    find_package(OpenSSL REQUIRED)   # 查找 OpenSSL（生成 OpenSSL::Crypto 等）
+    find_package(Threads REQUIRED)   # 查找系统线程库（生成 Threads::Threads）
+    ```
+
+    
+
+------
+
+###### 3. 自定义函数（封装重复操作）
+
+你定义了一个 `chat_warnings` 函数，用于给目标统一添加编译器警告标志，避免在每个 `add_executable` 后面重复写 `-Wall -Wextra`。
+
+
+
+```cmakec
+function(chat_warnings target)
+    target_compile_options(
+        ${target}
+        PRIVATE
+            -Wall -Wextra -Wpedantic   # PRIVATE 表示这些参数只影响该目标本身
+    )
+endfunction()
+```
+
+
+
+**调用方式**：`chat_warnings(minimuduo)` 即可。
+
+------
+
+###### 4. 创建库目标（静态库/动态库）
+
+-   **创建静态库**：
+
+    
+
+    ```cmake
+    add_library(minimuduo STATIC           # STATIC 生成 .a / .lib
+        src/minimuduo/net/Buffer.cpp
+        ...
+    )
+    ```
+
+    
+
+    **关键点**：源文件列表写在后面，若有多个目录，建议用 `GLOB`（不推荐）或用 `aux_source_directory`，但显式列出是 CMake 官方推荐做法（修改文件时 CMake 能自动感知）。
+
+------
+
+###### 5. 目标属性设置（核心：include 和 link）
+
+这是现代 CMake 的精髓：**用 `target_\*` 命令，而不是 `include_directories` 全局设置**。
+
+-   **设置头文件路径**：
+
+    
+
+    ```cmake
+    target_include_directories(minimuduo PUBLIC include)
+    ```
+
+    
+
+    -   `PUBLIC`：该路径不仅自己用，链接到此库的其他目标（如 `chat_core`）也会自动继承这个 `include` 路径。
+
+-   **链接库**：
+
+    
+
+    ```cmake
+    target_link_libraries(
+        chat_core
+        PUBLIC                         # 或 PRIVATE
+            minimuduo
+            PkgConfig::MYSQL
+            OpenSSL::Crypto
+            Threads::Threads
+    )
+    ```
+
+    
+
+    **可见性关键字（极其重要）**：
+
+    -   `PRIVATE`：只在当前目标内部使用，链接者不继承。
+    -   `PUBLIC`：当前目标使用，且**传递**给链接当前目标的上层目标。
+    -   `INTERFACE`：当前目标本身不用，仅用于让链接者使用（常用于纯头文件库）。
+
+------
+
+###### 6. 生成可执行文件与测试
+
+-   **生成可执行文件**：
+
+    
+
+    ```cmake
+    add_executable(chat_server src/server_main.cpp)
+    target_link_libraries(chat_server PRIVATE chat_core)  # server 依赖 core
+    ```
+
+    
+
+    注意 `chat_client` 没有链接 `chat_core`，而是直接包含了 `src/protocol.cpp`，说明它是独立编译的。
+
+-   **启用测试模块**：
+
+    
+
+    ```cmake
+    enable_testing()   # 启用 CTest
+    add_test(NAME proto_codec COMMAND test_proto)  # 注册测试
+    ```
+
+    
+
+    运行测试时，进入 build 目录执行 `ctest`。
+
+-   **设置测试属性（如超时）**：
+
+    
+
+    ```cmake
+    set_tests_properties(
+        master_sub_reactor_smoke
+        PROPERTIES TIMEOUT 10   # 10 秒后自动终止，防止死循环卡住测试
+    )
+    ```
+
+    
+
+------
+
+###### 7. 总结：现代 CMake 的黄金法则（针对你的脚本提炼）
+
+| 原则                       | 你的脚本体现                                                 |
+| :------------------------- | :----------------------------------------------------------- |
+| **避免全局变量**           | 没有用 `link_directories` 或 `include_directories`，全部用 `target_` 前缀。 |
+| **明确可见性**             | 指定了 `PUBLIC` / `PRIVATE`，让依赖传递变得可控。            |
+| **尽量用 `IMPORTED` 目标** | 链接时写 `OpenSSL::Crypto` 而不是 `-lssl`，更跨平台。        |
+| **将测试与主程序解耦**     | 测试目标（`test_xxx`）单独编译，并单独链接所需的最小依赖。   |
+
+------
+
+
+
+##### question
+
+###### 1. 请简述本项目使用的网络模型，并说明主 Reactor 和子 Reactor 各自承担什么职责。
+
+**答案**
+采用 **主从 Reactor 多线程模型**（即 `EventLoop` + `EventLoopThreadPool`）。
+
+-   **主 Reactor**（MainReactor）：运行在 `main` 线程，只负责监听 `Acceptor` 的 socket，接受新连接（`accept`），然后将新连接的 socket 分发给子 Reactor。
+-   **子 Reactor**（SubReactor）：由 `EventLoopThreadPool` 管理多个工作线程，每个线程运行一个 `EventLoop`（事件循环），负责已建立连接的 I/O 事件处理（读、写、错误等）。
+-   **优点**：主线程只处理 accept，负载轻；子线程并行处理 I/O，充分利用多核 CPU，提高并发能力。
+
+------
+
+###### 2. 什么是“粘包”问题？本项目如何解决？
+
+**答案**
+TCP 是流式协议，数据无边界，可能发生：
+
+-   **粘包**：多个完整消息被合并到一起发送。
+-   **拆包**：一个消息被分成多个 TCP 包发送。
+
+本项目采用 **基于分隔符的文本行协议**（每条命令以 `\n` 结尾）。
+
+-   在 `Buffer` 中通过 `findEOL()` 查找换行符；
+-   若找到，则提取该行并消费，剩余数据保留在缓冲区；
+-   若未找到，则继续等待后续数据；
+-   若缓冲区积累超过 `kMaxInputBuffer`（8KB）仍未遇到换行符，则主动关闭连接，防止恶意超长包。
+
+这种设计简单有效，且天然处理了粘包和拆包。
+
+------
+
+###### 3. Buffer 设计有何巧妙之处？如何避免频繁扩容和数据拷贝？
+
+**答案**
+`Buffer` 采用 `vector<char>` 作为动态缓冲区，并维护 `readerIndex_` 和 `writerIndex_` 两个指针（偏移量）。
+
+-   **读操作**：移动 `readerIndex_`，不实际删除数据。
+-   **写操作**：向 `writerIndex_` 位置写入，若可写空间不足，先尝试整理（将未读数据移到首部），若还不够则扩容。
+-   **预置空间**：头部预留 8 字节（`kCheapPrepend`），方便将来扩展。
+-   **减少拷贝**：`readFd` 使用 `readv` 分散读，利用栈上辅助缓冲区，避免反复扩容；`retrieve` 只是移动索引，不拷贝数据。
+
+------
+
+###### 4. 为什么使用 `eventfd` 而不是 `pipe` 作为唤醒机制？
+
+**答案**
+`eventfd` 是 Linux 提供的轻量级事件通知机制，比 `pipe` 更高效（只需一个文件描述符，内存占用小，读写操作简单）。本项目在 `EventLoop::wakeup()` 中写入一个 64 位整数，在 `handleWakeupRead()` 中读取，用于唤醒阻塞在 `epoll_wait` 中的线程，以便执行 `pendingFunctors`（跨线程任务）。
+
+
+
+###### 5. 如何保证线程安全的“注册在线用户”操作？若同一用户重复登录会怎样？
+
+**答案**
+使用 `online_mutex_` 保护 `online_users_`（`unordered_map<string, weak_ptr<TcpConnection>>`）。
+
+-   `register_online_user` 先加锁，检查该用户名是否已存在且连接有效，若存在则返回失败，防止重复登录。
+-   当连接断开或用户主动注销时，`remove_online_user` 同样加锁移除映射。
+-   `weak_ptr` 避免长期持有强引用导致连接无法释放，检查 `lock()` 是否为空来判断连接是否存活。
+
+------
+
+###### 6. 好友操作（添加/接受/拒绝）涉及多个数据库操作，如何保证原子性？为什么需要额外的 `friend_operation_mutex_`？
+
+**答案**
+数据库层面使用事务（`BEGIN` / `COMMIT` / `ROLLBACK`）保证多条 SQL 的原子性（如 `accept_friend_request` 先删请求再插好友关系）。
+但服务器是多线程的，来自不同线程的请求可能并发修改同一用户的好友数据，因此 **除了数据库事务，还需要应用层的互斥锁**（`friend_operation_mutex_`）来串行化同一业务逻辑，防止出现竞争条件（例如两人同时互相加好友导致重复插入等）。该项目特意为好友和群组操作增加了独立的锁，因为子 Reactor 是多线程的。
+
+------
+
+###### 7. 跨线程调用（如 `send` 方法）是如何实现的？为什么要这样设计？
+
+**答案**
+`TcpConnection::send` 会检查当前线程是否属于该连接的 `EventLoop`，若是则直接调用 `sendInLoop`，否则通过 `loop_->runInLoop` 将发送操作投递到连接所属的 I/O 线程执行。
+这样避免了多线程同时操作同一个 socket 描述符，保证了串行访问，且利用 `eventfd` 唤醒目标线程。同时，`runInLoop` 支持 `queueInLoop` 以应对可能的重入或大量回调。
+
+
+
+###### 8. 如何存储用户密码？为什么选择 PBKDF2？
+
+**答案**
+存储格式为 `pbkdf2_sha256$iterations$salt$hash`，使用 PBKDF2 算法（迭代次数 210000，盐长 16 字节，哈希长 32 字节）。
+
+-   PBKDF2 是密码学安全的密钥派生函数，能够抵抗暴力破解和彩虹表攻击。
+-   盐值随机生成，使相同密码产生不同密文。
+-   高迭代次数增加了计算成本，降低 GPU/ASIC 破解速度。
+-   `CRYPTO_memcmp` 用于比较哈希，防止时序攻击。
+
+------
+
+###### 9. 私聊消息的离线存储是如何实现的？当用户上线时如何投递？
+
+**答案**
+
+-   发送私聊消息时，不仅插入 `messages` 表，还会插入一条记录到 `private_message_deliveries` 表，初始 `delivered_at_unix_ms` 为 `NULL`，表示未送达。
+-   用户登录成功后，调用 `deliver_pending_messages` 查询该用户所有 `delivered_at_unix_ms IS NULL` 的记录，按顺序发送给客户端，每发送一条就更新为当前时间戳。
+-   若用户在线，则立即发送并同步更新投递时间（见 `handle_private_message` 中的回调）。
+
+**优点**：支持离线消息持久化，且投递状态清晰。
+
+------
+
+###### 10. 好友关系的存储为何使用 `user_low` 和 `user_high` 并保证 `user_low < user_high`？
+
+**答案**
+好友关系是无向的，如果存储两条记录（A-B 和 B-A），会导致数据冗余和查询复杂（需同时查两个方向）。
+采用规范化（`user_low` 较小，`user_high` 较大）并加唯一约束，只需一条记录，查询时用 `normalize_pair` 生成固定顺序，配合索引高效检索。同时检查 `user_low < user_high` 避免自环。
+
+
+
+###### 11. 为什么使用自定义的类似 Protobuf 的编码（varint + tag）而不是直接 JSON 或纯文本？
+
+**答案**
+自定义编码（参考 Protobuf）具有以下优势：
+
+-   **紧凑**：采用 varint 编码整数，减少网络传输体积。
+-   **灵活**：tag + wire 类型设计，支持字段可选、向后兼容（增加新字段不影响旧版本）。
+-   **高效**：无需 JSON 的引号、花括号等冗余符号，解析速度快。
+
+本项目将其用于 `friend_events`、`messages` 的 `payload` 列以及离线消息的序列化，保证存储和传输的紧凑性。
+
+------
+
+###### 12. 解析变长整型时，如何防止恶意数据导致死循环或内存耗尽？
+
+**答案**
+
+-   `read_varint` 函数限制最多循环 10 次（因为 varint 最大 64 位，每 7 位一组，最多 10 组），超过则返回失败，避免无限循环。
+-   解析 `length-delimited` 字段时，会校验 `length` 是否超过输入剩余字节数，防止越界读取。
+-   在 `skip_field` 中同样会检查长度，确保安全。
+
+###### 13. `accept_friend_request` 方法中，先删除 `friend_requests` 再插入 `friendships`，如果插入失败会回滚，但为什么还要检查 `mysql_affected_rows`？
+
+**答案**
+首先，数据库事务能保证两条 SQL 要么同时成功要么同时失败（回滚）。但 `mysql_affected_rows` 用于确认是否真的删除了至少一行，从而判断请求是否存在。
+若请求不存在（已被处理或从未存在），则应提前告知客户端“无此请求”，避免无谓的插入尝试。
+即使出错，也会调用 `rollback()` 保证一致性。
+
+------
+
+###### 14. 群组管理员（Owner/Admin）的权限控制是如何实现的？如何防止管理员删除自己或 Owner？
+
+**答案**
+
+-   群组成员角色存储在 `group_members.member_role`（1=Owner，2=Admin，3=Member）。
+-   在执行敏感操作（如 `remove_group_member`）时，先从数据库读取当前操作者的角色和目标用户的角色，然后根据规则判断：
+    -   只有 Owner/Admin 能移除成员。
+    -   Admin 不能移除 Owner 或另一个 Admin。
+    -   Owner 可以移除任何成员（除自己外，Owner 只能解散群组）。
+-   这些检查都在应用层加锁（`group_operation_mutex_`）并与数据库事务结合，保证原子性。
+
+
+
+------
+
+###### 16. 为什么离线消息投递采用“批量拉取 + 回调确认”方式，而不是逐条投递？
+
+**答案**
+
+-   减少数据库查询次数：一次性拉取最多 `kOfflineDeliveryBatch`（100 条），降低 I/O 压力。
+-   避免长时间占用连接：发送每条消息时异步触发数据库更新，但使用 `send` 的完成回调来更新投递状态，保证顺序。
+-   若批量拉取达到上限，提醒用户再次 `PENDING`，避免一次返回过多消息导致网络拥塞。
+
+
+
+###### 17. 如何处理客户端异常断开（如突然断电）？
+
+**答案**
+
+-   服务端通过 `epoll` 检测到 `EPOLLHUP` 或 `read` 返回 0，会触发 `handleClose`，执行清理：从 `online_users_` 移除、广播下线通知、析构 `TcpConnection`。
+-   使用 `shared_ptr` 管理连接，确保回调执行完毕后释放资源。
+-   未完成的发送队列不会阻塞，连接关闭后直接丢弃。
+
+------
+
+###### 18. 密码哈希使用了 `PBKDF2`，但 `verify_password_pbkdf2` 中为何要限制迭代次数范围（10000～2000000）？
+
+**答案**
+防止恶意构造过小或过大的迭代次数，导致：
+
+-   过小：弱安全性。
+-   过大：消耗服务器 CPU，可能引发 DoS 攻击。
+    通过范围校验确保哈希格式符合预期，同时也防止存储损坏的数据引起异常。
+
+
+
+###### 19. 该项目如何支持将来扩展文件传输功能？
+
+**答案**
+
+-   预留了 `FileTransferMetadata` 和 `FileTransferStore` 接口，但未实现网络命令。
+-   设计上可复用现有的 `TcpConnection` 和 `Buffer`，通过引入新的命令如 `FILE_SEND` 等，在 `handle_command` 中添加分支，并利用数据库或本地文件系统存储文件块。
+-   同时可结合 Redis Pub/Sub 进行跨服务器通知。
+
+##### `values.count`
+
+`count` 成员函数用于**检查指定的键（Key）在容器中是否存在**。
 
 
 
