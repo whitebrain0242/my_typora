@@ -1,0 +1,18 @@
+# Redis used only by chat_server.
+host=127.0.0.1
+port=6379
+password=
+database=0
+connect_timeout_ms=1000
+
+# Presence keys expire automatically if the server process crashes.
+# ChatServer refreshes them periodically from a maintenance thread.
+presence_ttl_seconds=120
+
+# Keys:
+#   chatroom:presence:<username>
+#   chatroom:unread:<username>
+key_prefix=chatroom
+
+# A PID suffix is appended at runtime to make the instance id unique.
+server_name=chat-server
