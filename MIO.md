@@ -455,3 +455,39 @@ void append_string_field(
     | `append_varint`       | `0x05`                     | 字符串长度 5，Varint 编码为 `0x05`        |
     | `out.append("Alice")` | `0x41 0x6C 0x69 0x63 0x65` | ASCII 码                                  |
     | **最终包片段**        | `0A 05 41 6C 69 63 65`     | 总共 7 个字节                             |
+
+### 	EventLoop
+
+```c++
+void EventLoop::doPendingFunctors() {
+    std::vector<Functor> functors;
+    callingPendingFunctors_.store(true);
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        functors.swap(pendingFunctors_);
+    }
+
+    for (const Functor& functor : functors) {
+        functor();
+    }
+
+    callingPendingFunctors_.store(false);
+}
+```
+
+-   **如果不加 `swap`**：你可能会想“直接遍历 `pendingFunctors_` 不就行了？”但不行，因为遍历期间必须一直锁着 `mutex_`。如果这些函数执行过程中，又有别的线程往里 `push` 新任务，就会发生**锁冲突**，甚至死锁。
+-   **用了 `swap` 的妙处**：它只在**极短的时间**（微秒级）内持有锁，把队列里的任务**“整个偷走”**（交换到局部变量 `functors`），然后**立刻释放锁**。这样一来，其他线程（比如主线程）可以随时继续往空的 `pendingFunctors_` 里无阻塞地添加新任务，而 I/O 线程则在锁外面，安心、安全地慢慢执行手中的旧任务列表。
+-   **关键点**：`isInLoopThread()` 判断当前线程是不是 I/O 线程。
+    -   当 `doPendingFunctors` 正在执行 `functor()` 时，如果这个 `functor` 里又调用了 `queueInLoop`，且 `callingPendingFunctors_` 为 `true`，库通常会**不唤醒** `eventfd`（因为 I/O 线程正在活跃运行，不需要额外唤醒），避免了无效的系统调用。
+
+
+
+
+
+##### 设计
+
+-   **MySQL（服务端全局数据库）**：存所有用户的账号、好友关系、群组、以及**历史的聊天消息**。所有 `ChatServer` 实例（如果你以后扩容）都得连同一个 MySQL，保证数据一致。
+-   **Redis（服务端内存缓存）**：存用户的**在线状态**（哪个服务器实例负责）和**未读消息数**。这东西必须快，且必须跨进程共享，所以也得是独立的服务。
+-   **SQLite（客户端本地缓存）**：这是在 **`client.cpp`（命令行客户端）** 里用的。它只存**你自己这台电脑**上的聊天记录，方便你离线查看历史。因为它只属于你一个人，没必要启动一个庞大的数据库服务，直接存成文件最简单。
+

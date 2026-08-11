@@ -989,6 +989,20 @@ dfs(node)=min(dfs(node.left),dfs(node.right))+1
 
 就是左子树比节点值小，右子树比节点值大的二叉树
 
+二叉搜索树的中序遍历
+
+```c#
+    void searchBST(TreeNode* cur) {
+        if (cur == NULL) return ;
+        searchBST(cur->left);       // 左
+        （处理节点）                // 中
+        searchBST(cur->right);      // 右
+        return ;
+    }
+```
+
+
+
 ##### 验证二叉搜索树P98
 
 ![img](file:////home/white/.config/QQ/nt_qq_fa6f8ae2d2dd591655d689996a896030/nt_data/Pic/2026-08/Ori/0e728f82bc624f23b56bacae3081071e.jpg)
