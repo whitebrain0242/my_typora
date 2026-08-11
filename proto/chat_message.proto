@@ -1,0 +1,16 @@
+syntax = "proto3";
+package chatroom.v7;
+
+enum ChatMessageType {
+  CHAT_MESSAGE_TYPE_UNSPECIFIED = 0;
+  PUBLIC = 1;
+  PRIVATE = 2;
+}
+
+message ChatMessagePayload {
+  ChatMessageType type = 1;
+  string sender_username = 2;
+  string recipient_username = 3;
+  string content = 4;
+  int64 created_at_unix_ms = 5;
+}

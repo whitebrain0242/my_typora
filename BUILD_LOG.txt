@@ -1,0 +1,90 @@
+CHATROOM v8.2 FINAL BUILD / VALIDATION LOG
+========================================================================
+
+BASE
+- v8.1: master/sub Reactor + groups + offline messages
+- server Redis
+- client SQLite
+
+V8.2 ADDED
+- online private file transfer
+- offline private file delivery
+- online group file transfer
+- offline group file delivery
+- SHA-256 verification
+- MySQL file delivery persistence
+- Redis private_file/group_file unread
+- SQLite local file records
+- official Protocol Buffers C++ toolchain
+
+PROTOBUF MIGRATION
+- include/proto_codec.hpp: DELETED
+- src/proto_codec.cpp: DELETED
+- hand-written varint/tag/wire parser: REMOVED
+- final CMake:
+    find_package(Protobuf REQUIRED)
+    protobuf_generate(...)
+    protobuf::libprotobuf
+- business/database API:
+    SerializeToString()
+    ParseFromArray()
+    generated getters/setters
+
+CURRENT EXECUTION ENVIRONMENT
+- C++ compiler: available
+- CMake: available
+- mysqlclient dev: available
+- hiredis: available
+- sqlite3: available
+- OpenSSL: available
+- protobuf-compiler/protoc: NOT installed
+- libprotobuf-dev headers: NOT installed
+
+CMAKE PROBE
+- reached find_package(Protobuf REQUIRED)
+- stopped because Protobuf_LIBRARIES / Protobuf_INCLUDE_DIR are unavailable
+- no custom-codec fallback exists
+
+SOURCE/API-SHAPE VALIDATION
+- full server source + Reactor link check: PASS
+- client full build: PASS
+- -Wall -Wextra -Wpedantic project-source warnings: 0
+
+EXECUTED TESTS
+- password: PASS
+- Buffer: PASS
+- Main/Sub Reactor smoke: PASS
+- Reactor round-robin distribution: PASS
+- cross-thread eventfd send: PASS
+- Base64/SHA/token/file utils: PASS
+- server file storage/finalize: PASS
+- SQLite message/file cache: PASS
+- hiredis presence/message/file unread: PASS
+
+OFFICIAL PROTOBUF CTEST
+- tests/test_proto.cpp is included
+- tests official generated FriendEvent/ChatMessage/GroupMessage/FileTransfer classes
+- tests historical v7.x fixed wire bytes
+- not executable in this environment until protobuf-compiler/libprotobuf-dev are installed
+
+TARGET-MACHINE FINAL VALIDATION
+------------------------------------------------------------------------
+sudo apt install -y \
+  build-essential cmake pkg-config \
+  default-libmysqlclient-dev libssl-dev \
+  libhiredis-dev libsqlite3-dev \
+  protobuf-compiler libprotobuf-dev redis-server
+
+cmake -S . -B build
+cmake --build build
+ctest --test-dir build --output-on-failure
+
+Then run MySQL + Redis + multiple clients and test:
+- SEND_FILE online
+- SEND_FILE to offline user, login and receive
+- SEND_GROUP_FILE online
+- offline group member login and receive
+- client SHA-256 acknowledgement
+- LOCAL_FILES
+- Redis private_file/group_file counters
+- server restart and pending file delivery
