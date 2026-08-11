@@ -3204,3 +3204,238 @@ TCP 是流式协议，数据无边界，可能发生：
 
 
 
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client as 客户端 (TCP)
+    participant Network as 网络层 (minimuduo)
+    participant Business as 业务层 (ChatServer)
+    participant Storage as 存储层 (MySqlDatabase)
+    participant Codec as 编解码 (proto_codec)
+
+    Note over Client, Codec: 场景：客户端发送 "SAY Hello"
+    
+    Client->>+Network: 发送原始文本 "SAY Hello\n"
+    Network->>Network: TcpConnection::handleRead()<br/>(从 socket 读入 Buffer)
+    Network->>Network: onMessage 回调<br/>(按 \n 拆包)
+    Network->>+Business: ChatServer::on_message(connection, buffer)
+    
+    Business->>Business: parse_command(line)<br/>(解析出命令名 "SAY")
+    Business->>Business: handle_command("SAY")<br/>(路由到具体处理函数)
+    
+    rect rgb(240, 248, 255)
+        Note over Business: 执行 handle_public_message()
+        Business->>Business: require_login()<br/>(校验会话是否已登录)
+        Business->>Business: trim(message) & 长度校验
+    end
+    
+    Business->>+Storage: database_.add_message(payload, msg_id, error)
+    Storage->>Storage: 序列化 payload<br/>(调用 serialize_chat_message)
+    Storage->>Storage: 执行 INSERT SQL<br/>(写入 messages 表)
+    Storage-->>-Business: 返回 message_id
+    
+    Business->>Business: broadcast_to_logged_in()<br/>(遍历在线用户列表)
+    
+    loop 广播给其他在线客户端
+        Business->>+Network: connection->send(formatted_message)
+        Network->>Network: sendInLoop()<br/>(写入 outputBuffer_)
+        Network->>Network: 启用 EPOLLOUT<br/>(等待 socket 可写)
+        Network-->>-Client: 发送数据 " [user] Hello\n"
+    end
+
+    Business-->>-Network: 返回
+    Network-->>-Client: (完成发送)
+```
+
+#### DAY23
+
+##### 零拷贝
+
+我大概明白了，也就是说
+
+假设我们现在要把本地的文件发送给socket,那么我们需要先read硬盘，然后在write到socket缓冲区中
+
+1.   用户态-》内核态————调用read,转换到内核态，然后用DMA从硬盘上面读取数据，把数据copy到内核缓冲区
+2.   内核态-》用户态————从硬盘上读取的数据使用**CPU搬运**到用户缓冲区
+3.   用户态-》内核态————将获得的数据调用write,到内核缓冲区，然后使用**CPU搬运**到socket缓冲区
+4.   内核态-》用户态————此时数据已经发送过去，所以我们向用户态返回
+5.   最后，DMA会把socket缓冲区中的数据copy发送给网卡
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant App as 👤 用户进程(Java/应用)
+    participant Kernel as 🖥️ 操作系统内核
+    participant Disk as 💾 硬盘(硬件)
+    participant NIC as 🌐 网卡(硬件)
+
+    Note over App, Kernel: ① 第1次上下文切换
+    App->>Kernel: 调用 read() 系统调用
+    Kernel->>Disk: DMA 指令：读取数据
+    Disk-->>Kernel: 拷贝1 (DMA)：硬盘 → 内核缓冲区
+    Note over App, Kernel: ② 第2次上下文切换
+    Kernel-->>App: 拷贝2 (CPU搬运)：内核缓冲区 → 用户缓冲区
+    
+    Note over App, Kernel: ③ 第3次上下文切换
+    App->>Kernel: 调用 write() 系统调用
+    Kernel->>NIC: 拷贝3 (CPU搬运)：用户缓冲区 → Socket缓冲区
+    Note over App, Kernel: ④ 第4次上下文切换
+    Kernel-->>App: write() 返回(发送指令)
+    
+    NIC-->>NIC: 拷贝4 (DMA)：Socket缓冲区 → 网卡发出去
+```
+
+如果不使用零拷贝，那么需要经历 **4 次上下文切换** 和 **4 次数据拷贝**（其中 2 次需要 CPU 亲自搬运）。
+
+但是如果使用了零拷贝（snedfile），那么只经历 **2 次上下文切换** 和 **3 次数据拷贝**（且 CPU 只搬运 1 次，甚至在某些网卡支持下 CPU 搬运 0 次）。
+
+假设我们现在要把硬盘上的数据发到socket中去
+
+1.   用户态-》内核态————调用sendfile,转换到内核态，然后用DMA从硬盘上面读取数据，把数据通过DMA copy到内核缓冲区
+2.   内核态————将获得的数据使用**CPU搬运**到socket缓冲区
+3.   内核态-》用户态————此时数据已经发送过去，所以我们向用户态返回
+4.   最后，DMA会把socket缓冲区中的数据copy发送给网卡
+
+因为在用户太的时候并没有对数据产生任何操作，所以我们索性就不然数据接触用户态，这样省去了两次上下文切换
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant App as 👤 用户进程(Nginx/Kafka)
+    participant Kernel as 🖥️ 操作系统内核
+    participant Disk as 💾 硬盘(硬件)
+    participant NIC as 🌐 网卡(硬件)
+
+    Note over App, Kernel: ① 第1次上下文切换
+    App->>Kernel: 调用 sendfile() 系统调用(一个指令搞定)
+    Kernel->>Disk: DMA 指令：读取数据
+    Disk-->>Kernel: 拷贝1 (DMA)：硬盘 → 内核缓冲区
+    
+    Kernel->>NIC: 拷贝2 (CPU或描述符)：内核缓冲区 → Socket缓冲区
+    Note over App, Kernel: ② 第2次上下文切换
+    Kernel-->>App: sendfile() 返回(发送完成)
+    
+    NIC-->>NIC: 拷贝3 (DMA)：Socket缓冲区 → 网卡发出去
+
+    Note over App, NIC: ✅ 关键：数据全程未进入用户态内存！
+```
+
+需要注意的是，write和read其实是直接写数据的
+
+![deepseek_mermaid_20260811_8602ed](/home/white/my_typora/myChatRoom.assets/deepseek_mermaid_20260811_8602ed.png)![deepseek_mermaid_20260811_14ffd1](/home/white/my_typora/myChatRoom.assets/deepseek_mermaid_20260811_14ffd1.png)
+
+##### 文件IO
+
+
+
+---
+
+###### 问题一：阻塞噩梦（Blocking Nightmare）
+
+**🔴 是怎么产生的？**
+
+假设现在服务器要通过TCP向客户端发送数据，也就是服务端使用write写数据到内核缓冲区，而客户端read读数据到内存中
+
+- **原理**：TCP 的 Socket 缓冲区（`sk_buff`）是有大小限制的（通常约几十KB）。当客户端read处理极慢（read频率太低或者是每次读取数据申请的缓冲区太小）或网络拥塞时，客户端的内核缓冲区数据巨大没有空窗，也会导致服务端的内核发送缓冲区会被填满，发不出去。
+- 由于客户端的接受缓冲区满，一方面导致新来的网络数据包会被直接丢弃，另一方面，在客户端向服务端返回ACK时，TCP头部接收窗口字段是计算生于空间大小的，此时会返回0
+- 服务端受到0的ACK包，服务端的 TCP 拥塞控制模块判定对端无法接收，**停止向网卡写入任何新数据包**。
+- 服务端应用程序的业务线程还在继续调用 `write` 产生新数据，
+- 由于 TCP 窗口为 0，网卡发送队列停止，数据无法发走。
+- 这些待发数据只能积压在服务端的 `sk_wmem_queued`（发送缓冲区）里，直至达到 `sk_sndbuf`（发送缓冲区上限）。
+- **后果**：服务端内核调用 `sk_stream_wait_memory`，将该业务线程挂起（阻塞）。解除阻塞的唯一条件就是收到客户端发来 `rwnd > 0` 的 ACK。
+
+**🟢 怎么解决？（IO多路复用 + 非阻塞）**
+
+核心思想：**“由内核帮忙盯着，哪个Socket能写了，再通知我去写，绝不傻等。”**
+
+**标准处理流程（基于 epoll）：**
+
+**方案：非阻塞IO + IO多路复用（epoll）**
+
+-   **不再使用阻塞式 `read`/`write`**：通过 `fcntl(fd, F_SETFL, O_NONBLOCK)` 将Socket设为非阻塞。
+-   **具体逻辑**：
+    -   服务端调用 `write` 时，如果发送缓冲区满了，内核**不挂起线程**，而是直接返回 `-1`，错误码 `EAGAIN`。
+    -   服务端将这个连接和 `EPOLLOUT`（可写事件）注册到 `epoll` 实例中。
+    -   线程转而处理其他成千上万的连接（不再傻等）。
+    -   **唤醒机制**：当客户端终于收走数据，服务端发送缓冲区有了空位，内核触发 `EPOLLOUT` 事件，`epoll_wait` 返回，线程收到通知后，**重新调用 `write`** 发送剩余数据。
+-   **结果**：服务端线程**永远不会**因为某个客户端网速慢而被挂起，一个线程轻松管理数万连接。
+
+> **一句话总结**：把“同步阻塞”改为“状态机驱动”，一个线程能管理数万个连接（Redis、Nginx都是这么干的）。
+
+---
+
+###### 问题二：粘包与半包（Sticky Packet & Half Packet）
+
+**🔴 是怎么产生的？**
+
+- **根本原因**：**TCP 是流式协议（Stream）**，没有“消息边界”的概念。
+- **半包**：你调用 `send(file, 1MB)`，内核协议栈会基于 **MSS（最大分段大小）** 将数据切成多个 Segment 发出去。接收方调用一次 `recv`，可能只收到 512 字节（这只是完整数据的开头一部分）。
+- **粘包**：接收方调用一次 `recv`，但内核缓冲区里堆积了两次 `send` 的数据，结果一次取出来包含了两条完整的消息，混在一起分不清。
+
+**🟢 怎么解决？（应用层协议设计——Length Field）**
+
+解决流式无边界问题的唯一方法：**在应用层自定义协议头（Header）**。
+
+**标准处理流程（最通用的解法）：**
+
+1. **协议格式**：`[固定长度头部 Header][可变长度 Body]`。头部必须包含 **Body 的总长度**。例如：`Header = 4字节整数（代表后面的Body长度）`。
+2. **接收缓冲区**：在用户态维护一个**动态扩容的接收缓冲区**（`byte[] recvBuf`）。
+3. **拆包逻辑（状态机）**：
+   - **第一步（读Header）**：循环调用 `recv`，直到 `recvBuf` 里的数据 >= 4 字节。
+   - 取出 4 字节，解析出 `bodyLen`（比如 1024）。
+   - **第二步（读Body）**：继续循环调用 `recv`，直到 `recvBuf` 里的数据 >= `4 + bodyLen`。
+   - 从缓冲区截取出完整的 `bodyLen` 字节，交给业务逻辑处理。
+   - **关键收尾**：截取完后，把 `recvBuf` 中已处理的数据**删掉（丢弃）**，剩余的数据（如果是粘包，剩余的就是下一条消息的开头）保留，留在缓冲区里等待下一次循环处理。
+
+> **面试高频函数**：如果自己写底层，通常封装一个 `int readn(int fd, char* buf, int n)` 函数，确保循环读取直到收满 `n` 个字节才返回。
+
+---
+
+###### 问题三：断点续传（Resumable Transfer）
+
+**🔴 是怎么产生的？**
+
+- 传了 99% 的文件（比如 99GB 中的前 98GB），客户端网线被踢掉了。TCP 连接断开。
+- 重新建立连接后，如果从文件开头（Offset=0）继续传，相当于**前 98GB 的流量和耗时完全白费**。这在 GB 级别的文件传输中是绝对不可接受的。
+
+**🟢 怎么解决？（支持 Range 请求 + 文件指针定位）**
+
+**方案：记录偏移量（Offset）+ `lseek` 或 `sendfile` 偏移参数**
+
+-   **记录进度**：在应用层（Redis/本地文件）维护一个 `sent_offset`，每发送成功一批数据，就更新这个值。
+-   **重连恢复**：客户端重连时，在协议头里告诉服务端：“我需要从第 `sent_offset` 字节开始”。
+-   **底层定位（关键）**：
+    -   如果用传统 `read`：调用 `lseek(fd, sent_offset, SEEK_SET)`，将文件指针移到该位置。
+    -   如果用零拷贝 `sendfile`：`sendfile(out_fd, in_fd, &offset, count)` 的第三个参数是**引用传递**。内核会自动更新这个偏移量。服务端只需将内存中的 `offset` 传给 `sendfile`，网卡就会直接从断点处开始DMA抓取。
+-   **结果**：文件不用从头重传，节省 99% 的流量和时间。
+
+---
+
+###### 问题四：内存拷贝开销（CPU 被榨干）
+
+**🔴 是怎么产生的？**
+
+- 你在代码里写的 `byte[] buffer = new byte[1024]`，这是在 **用户态** 分配的内存。
+- 数据路径：硬盘 → `read()` → 内核缓冲区 → **拷贝到你的 buffer（CPU 搬运①）** → `write()` → **拷贝到 Socket 缓冲区（CPU 搬运②）** → 网卡。
+- 每一次 `read` + `write`，CPU 都要当两次“搬运工”。在千兆/万兆网络下，CPU 会被这种无意义的拷贝打满 100%，导致业务逻辑（如解压、加密）无法执行。
+
+**🟢 怎么解决？（零拷贝 Zero-Copy）**
+
+零拷贝不是魔法，它的本质是：**直接把内核态的数据描述符（物理内存地址）传给网卡，让网卡 DMA 自己去取，绕开 CPU 搬运。**
+
+**标准处理流程：**
+
+1. **抛弃 `read` + `write`**，不要再手动申请 `byte[]` 用户态缓冲区。
+2. **改用 `sendfile` 系统调用**（Java 对应 `FileChannel.transferTo`，Netty 对应 `FileRegion`）。
+3. **函数原型**：`ssize_t sendfile(int out_fd, int in_fd, off_t *offset, size_t count);`
+4. **流程**：
+   - 调用 `sendfile`，CPU 切入内核态。
+   - 内核直接让硬盘 DMA 将数据读入 Page Cache（内核缓冲区）。
+   - **（如果网卡支持 SG-DMA）** 内核仅把“数据位于 Page Cache 的地址和长度”发给网卡。
+   - 网卡 DMA 控制器直接跨过 CPU，从 Page Cache 抓取数据发走。
+   - **结果**：数据**从硬盘到网卡**，**完全没经过**你的 Java/C++ 用户态内存，CPU 只负责发号施令，一次数据都没碰。
+
+> **注意**：零拷贝只适合“数据不动，直接转发”的场景（如 Nginx 传静态文件、Kafka 存日志）。如果你需要对数据进行加密或压缩，对不起，还是得老老实实拷贝回用户态让 CPU 处理。
+
+---
+
