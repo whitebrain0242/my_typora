@@ -10,6 +10,65 @@
 8.   调用mainloop的loop开始epoll_wait
 9.   main_loop.loop();
 
+```text
+main()
+ ├─ 解析参数,加载配置
+ ├─ load_mysql_config() + database.connect()
+ ├─ load_redis_config() + redis.connect() + redis.ping()
+ ├─ 构造 listen_address
+ ├─ 创建 EventLoop main_loop
+ ├─ 创建 TcpServer tcp_server(&main_loop, listen_address, "chat")
+ ├─ tcp_server.setThreadNum(worker_threads)      // 启动 worker_threads 个子循环
+ ├─ chat_server.emplace( tcp_server, database, redis, server_instance_id, ... )
+ │   └─ 此处会调用 tcp_server.setConnectionCallback(...) 等，绑定业务处理函数
+ ├─ tcp_server.start()
+ │   ├─ 开启 listen fd
+ │   ├─ 启动 SubReactor 线程（每个线程运行 EventLoop::loop()）
+ │   └─ 主线程继续往下
+ ├─ main_loop.loop()
+ │   ├─ 注册 Acceptor 到 main_loop
+ │   ├─ 开始 epoll_wait 循环
+ │   ├─ 接受新连接，通过 round-robin 分配给某个 SubReactor
+ │   └─ 直到程序终止
+ └─ return 0
+```
+
+#### sqlite
+
+```
+【客户端启动】
+    ↓
+1. open() 
+    ├── sqlite3_open_v2()  → 打开物理文件
+    ├── sqlite3_busy_timeout() → 设置等待超时
+    └── initialize_schema()
+            ├── sqlite3_exec(PRAGMA...) → WAL模式调优
+            └── sqlite3_exec(CREATE TABLE) → 建表
+    ↓
+【运行时业务】
+    ↓
+2. 写入 (cache_*)
+    ├── sqlite3_prepare_v2(SQL带?) → 准备
+    ├── sqlite3_bind_*(...) → 绑值
+    ├── sqlite3_step() → 执行 (检查 SQLITE_DONE)
+    └── 自动 finalize (RAII析构)
+    ↓
+3. 读取 (recent_*)
+    ├── sqlite3_prepare_v2 → 准备
+    ├── sqlite3_bind_* → 绑值
+    ├── while(sqlite3_step() == SQLITE_ROW)
+    │   └── sqlite3_column_* → 取字段
+    ├── std::reverse() → 调正顺序
+    └── 自动 finalize (RAII析构)
+    ↓
+【程序退出】
+    ↓
+4. ~SqliteClient()
+    └── sqlite3_close(database_) → 关闭连接
+```
+
+
+
 #### tcp_server.start()
 
 1.   threadPool_->start();————创建指定数量的线程，并且添加编号
