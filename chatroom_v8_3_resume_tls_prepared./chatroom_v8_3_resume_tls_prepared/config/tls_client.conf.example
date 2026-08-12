@@ -1,0 +1,5 @@
+enabled=true
+verify_peer=true
+ca_file=config/tls/ca.crt
+# Leave empty to verify the actual IP/host passed to chat_client.
+server_name=
