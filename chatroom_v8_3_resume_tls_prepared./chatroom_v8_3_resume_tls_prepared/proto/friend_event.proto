@@ -1,0 +1,17 @@
+syntax = "proto3";
+package chatroom.v7;
+
+enum FriendEventType {
+  FRIEND_EVENT_TYPE_UNSPECIFIED = 0;
+  FRIEND_REQUEST_SENT = 1;
+  FRIEND_REQUEST_ACCEPTED = 2;
+  FRIEND_REQUEST_REJECTED = 3;
+  FRIEND_REMOVED = 4;
+}
+
+message FriendEventPayload {
+  FriendEventType type = 1;
+  string actor_username = 2;
+  string target_username = 3;
+  int64 occurred_at_unix_ms = 4;
+}
