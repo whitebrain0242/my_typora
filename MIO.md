@@ -491,3 +491,1576 @@ void EventLoop::doPendingFunctors() {
 -   **Redis（服务端内存缓存）**：存用户的**在线状态**（哪个服务器实例负责）和**未读消息数**。这东西必须快，且必须跨进程共享，所以也得是独立的服务。
 -   **SQLite（客户端本地缓存）**：这是在 **`client.cpp`（命令行客户端）** 里用的。它只存**你自己这台电脑**上的聊天记录，方便你离线查看历史。因为它只属于你一个人，没必要启动一个庞大的数据库服务，直接存成文件最简单。
 
+### sqlite_client
+
+好的，我来逐行讲解这段 `SqliteClient` 的 C++ 代码。它封装了 SQLite 数据库操作，用于缓存私聊消息、群聊消息和文件传输记录。我会按函数和逻辑块展开，说明每行（或每段）在做什么。
+
+---
+
+```cpp
+namespace {
+```
+
+- 开始一个**匿名命名空间**，其中的类型和函数仅在当前编译单元可见，避免符号冲突。
+
+---
+
+#### `StatementPtr` 类型别名
+
+```cpp
+using StatementPtr =
+    std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>;
+```
+
+- 定义 `StatementPtr` 为 **智能指针**，管理 `sqlite3_stmt*`（预处理语句对象），删除器是 `sqlite3_finalize`。这样当指针销毁时会自动调用 `sqlite3_finalize` 释放语句资源，实现 RAII。
+
+---
+
+#### `bind_text` 辅助函数
+
+```cpp
+bool bind_text(
+    sqlite3_stmt* statement,
+    int index,
+    const std::string& value
+) {
+    return sqlite3_bind_text(
+        statement,//预编译语句对象
+        index,//占位符的索引
+        value.c_str(),//要绑定到占位符的数据指针
+        static_cast<int>(value.size()),//要绑定数据的长度
+        SQLITE_TRANSIENT//为了确保指针不会被一位修改，在内部复制字符串保存，保证指针有效
+    ) == SQLITE_OK;
+}
+```
+
+- 封装 `sqlite3_bind_text`，将 `std::string` 绑定到 SQL 语句的参数占位符（`?`）上。
+- `SQLITE_TRANSIENT` 告诉 SQLite “**这块内存可能随时失效（因为是临时 string），请你在内部把数据拷贝一份。**”
+- 返回绑定是否成功（`SQLITE_OK`）。
+
+---
+
+#### `sqlite_error` 辅助函数
+
+```cpp
+std::string sqlite_error(sqlite3* database) {
+    return database != nullptr
+        ? sqlite3_errmsg(database)
+        : "SQLite database is null";
+}
+```
+
+- 从数据库连接对象获取最近一次错误的描述字符串；若连接为空则返回自定义信息。
+
+---
+
+匿名命名空间结束。
+
+---
+
+#### 2. 析构函数 `~SqliteClient()`
+
+```cpp
+SqliteClient::~SqliteClient() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    close_locked();
+}
+```
+
+- 析构时加锁（保护多线程环境），然后调用 `close_locked()` 关闭数据库连接。确保资源释放。
+
+---
+
+#### 3. 打开数据库 `open`
+
+```cpp
+bool SqliteClient::open(
+    const std::string& database_path,
+    std::string& error
+) {
+    std::lock_guard<std::mutex> lock(mutex_);
+```
+
+- 加互斥锁，保证线程安全。
+
+```cpp
+    close_locked();
+```
+
+- 如果已经打开，先关闭旧的连接（避免重复打开）。
+
+```cpp
+    const std::filesystem::path path(database_path);
+    if (path.has_parent_path() &&
+        !path.parent_path().empty()) {
+        std::error_code directory_error;
+        std::filesystem::create_directories(
+            path.parent_path(),
+            directory_error
+        );
+
+        if (directory_error) {
+            error =
+                "cannot create SQLite directory: " +
+                directory_error.message();
+            return false;
+        }
+    }
+```
+
+- 检查路径是否包含父目录，如果有则递归创建目录（`create_directories`），若失败则返回错误。**在创建或打开SQLite数据库文件之前，先确保存放它的父目录（文件夹）已经存在。如果不存在，就递归地创建出来。**
+
+```cpp
+    if (sqlite3_open_v2(
+            database_path.c_str(),
+            &database_,
+            SQLITE_OPEN_READWRITE |
+                SQLITE_OPEN_CREATE |
+                SQLITE_OPEN_FULLMUTEX,
+            nullptr
+        ) != SQLITE_OK) {
+        error = sqlite_error(database_);
+        close_locked();
+        return false;
+    }
+```
+
+- 用 `sqlite3_open_v2` 打开或创建数据库文件。
+- 标志：`READWRITE | CREATE` 表示读写且不存在则创建；`FULLMUTEX` 启用线程安全模式（串行化）。
+- 若失败，获取错误信息，关闭连接并返回 false。
+
+```cpp
+    database_path_ = database_path;
+    sqlite3_busy_timeout(database_, 3000);
+```
+
+- 保存路径；设置忙超时为 3000 毫秒（3秒），当数据库被锁定时等待这么长时间再返回错误。
+
+```cpp
+    return initialize_schema(error);
+}
+```
+
+- 调用 `initialize_schema` 创建表（如果不存在），返回其结果。
+
+---
+
+#### 4. 缓存私聊消息 `cache_private_message`
+
+```cpp
+bool SqliteClient::cache_private_message(
+    const LocalPrivateMessage& message,
+    std::string& error
+) {
+    std::lock_guard<std::mutex> lock(mutex_);
+```
+
+- 加锁。
+
+```cpp
+    static constexpr const char* sql =
+        "INSERT INTO private_messages("
+        "account_username,server_message_id,peer_username,"
+        "sender_username,recipient_username,content,"
+        "received_at_unix_ms,outgoing,offline_delivery"
+        ") VALUES(?,?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(account_username,server_message_id) "
+        "DO UPDATE SET "
+        "peer_username=excluded.peer_username,"
+        "sender_username=excluded.sender_username,"
+        "recipient_username=excluded.recipient_username,"
+        "content=excluded.content,"
+        "received_at_unix_ms=MIN("
+        "private_messages.received_at_unix_ms,"
+        "excluded.received_at_unix_ms),"
+        "outgoing=excluded.outgoing,"
+        "offline_delivery=MAX("
+        "private_messages.offline_delivery,"
+        "excluded.offline_delivery)";
+```
+
+- SQL 插入语句，带有 `ON CONFLICT` 处理：当 `(account_username, server_message_id)` 冲突时，执行更新。**保证同一条服务端消息，不会在某个用户的收件箱里重复插入两次。**
+
+- 比如服务器发送消息后，客户端因没收到 ACK 而重连请求，服务器再次尝试插入同一条 `server_message_id`。此时不会报错，而是触发更新。
+
+- 更新时：`received_at_unix_ms` 取旧值和新值中的较小值（保留最早时间），`offline_delivery` 取最大值（更可能为离线），其他字段用新值覆盖。
+
+- 
+
+- | 参数                  | 物理约束     | 值域约束      | 业务逻辑约束（与其他字段的关系）              |
+    | :-------------------- | :----------- | :------------ | :-------------------------------------------- |
+    | `account_username`    | NOT NULL, PK | 存在的用户    | 定义为当前收件箱/发件箱的主人                 |
+    | `server_message_id`   | NOT NULL, PK | 全局唯一 ID   | 与另一个 account 的同 ID 记录配对             |
+    | `peer_username`       | NOT NULL     | 存在的用户    | 不能等于 `account_username`                   |
+    | `sender_username`     | NOT NULL     | 存在的用户    | 与 `outgoing` 值联动（见约束 A）              |
+    | `recipient_username`  | NOT NULL     | 存在的用户    | 与 `outgoing` 值联动（见约束 A）              |
+    | `content`             | NOT NULL     | 文本/长度限制 | 配对的两条记录必须完全相同                    |
+    | `received_at_unix_ms` | NOT NULL     | 正毫秒时间戳  | 冲突更新时只能取 MIN（变小）                  |
+    | `outgoing`            | NOT NULL     | 0 或 1        | 决定了 `account` 与 `sender/recipient` 的关系 |
+    | `offline_delivery`    | NOT NULL     | 0 或 1        | 冲突更新时只能取 MAX（变成 1）                |
+
+```cpp
+    sqlite3_stmt* raw_statement = nullptr;
+
+    if (sqlite3_prepare_v2(
+            database_,
+            sql,
+            -1,
+            &raw_statement,
+            nullptr
+        ) != SQLITE_OK) {
+        error = sqlite_error(database_);
+        return false;
+    }
+```
+
+- 准备 SQL 语句，`-1` 表示读取完整字符串。若失败则返回错误。
+
+```cpp
+    StatementPtr statement(
+        raw_statement,
+        sqlite3_finalize
+    );
+```
+
+- 将原始指针包装进 `StatementPtr`，确保自动 finalize。
+
+```cpp
+    const bool bound =
+        bind_text(statement.get(), 1, message.account_username) &&
+        sqlite3_bind_int64(
+            statement.get(),
+            2,
+            static_cast<sqlite3_int64>(
+                message.server_message_id
+            )
+        ) == SQLITE_OK &&
+        bind_text(statement.get(), 3, message.peer_username) &&
+        bind_text(statement.get(), 4, message.sender_username) &&
+        bind_text(statement.get(), 5, message.recipient_username) &&
+        bind_text(statement.get(), 6, message.content) &&
+        sqlite3_bind_int64(
+            statement.get(),
+            7,
+            static_cast<sqlite3_int64>(
+                message.received_at_unix_ms
+            )
+        ) == SQLITE_OK &&
+        sqlite3_bind_int(
+            statement.get(),
+            8,
+            message.outgoing ? 1 : 0
+        ) == SQLITE_OK &&
+        sqlite3_bind_int(
+            statement.get(),
+            9,
+            message.offline_delivery ? 1 : 0
+        ) == SQLITE_OK;
+```
+
+- 按顺序绑定所有参数（索引从1开始）。`bind_text` 绑定字符串，`sqlite3_bind_int64` 绑定整数，`sqlite3_bind_int` 绑定布尔值（转为0/1）。
+- `bound` 为 `true` 表示所有绑定成功。
+
+```cpp
+    if (!bound) {
+        error = sqlite_error(database_);
+        return false;
+    }
+```
+
+- 若绑定失败，返回错误。
+
+```cpp
+    if (sqlite3_step(statement.get()) != SQLITE_DONE) {
+        error = sqlite_error(database_);
+        return false;
+    }
+
+    return true;
+}
+```
+
+- 执行语句，若结果不是 `SQLITE_DONE`（表示完成插入/更新），则报错；否则成功。
+
+---
+
+#### 5. 缓存群聊消息 `cache_group_message`
+
+与 `cache_private_message` 结构几乎相同，但针对 `group_messages` 表，字段少了 `recipient_username`（群聊不需要接收者），其他类似。不再赘述每行，逻辑一致。
+
+---
+
+#### 6. 获取最近私聊消息 `recent_private_messages`
+
+```cpp
+bool SqliteClient::recent_private_messages(
+    const std::string& account_username,
+    const std::string& peer_username,
+    std::size_t count,
+    std::vector<LocalPrivateMessage>& messages,
+    std::string& error
+) {
+    std::lock_guard<std::mutex> lock(mutex_);
+```
+
+- 加锁。
+
+```cpp
+    static constexpr const char* sql =
+        "SELECT server_message_id,peer_username,"
+        "sender_username,recipient_username,content,"
+        "received_at_unix_ms,outgoing,offline_delivery "
+        "FROM private_messages "
+        "WHERE account_username=? AND peer_username=? "
+        "ORDER BY server_message_id DESC LIMIT ?";
+```
+
+- 查询指定账户和对方的最近 `count` 条消息，按 `server_message_id` 降序（最新的在前）取前 `count` 条。
+
+```cpp
+    sqlite3_stmt* raw_statement = nullptr;
+    if (sqlite3_prepare_v2(...) != SQLITE_OK) { ... }
+    StatementPtr statement(...);
+```
+
+- 准备并包装语句。
+
+```cpp
+    if (!bind_text(statement.get(), 1, account_username) ||
+        !bind_text(statement.get(), 2, peer_username) ||
+        sqlite3_bind_int64(
+            statement.get(),
+            3,
+            static_cast<sqlite3_int64>(count)
+        ) != SQLITE_OK) {
+        error = sqlite_error(database_);
+        return false;
+    }
+```
+
+- 绑定三个参数：用户名、对方用户名、数量。
+
+```cpp
+    messages.clear();
+```
+
+- 清空输出向量。
+
+```cpp
+    while (true) {
+        const int result = sqlite3_step(statement.get());
+
+        if (result == SQLITE_DONE) {
+            break;
+        }
+
+        if (result != SQLITE_ROW) {
+            error = sqlite_error(database_);
+            return false;
+        }
+```
+
+- 循环取行：`SQLITE_DONE` 表示结束，`SQLITE_ROW` 表示有数据，其他为错误。
+
+```cpp
+        LocalPrivateMessage message;
+        message.server_message_id =
+            static_cast<std::uint64_t>(
+                sqlite3_column_int64(
+                    statement.get(),
+                    0
+                )
+            );
+        message.account_username = account_username;
+        message.peer_username =
+            reinterpret_cast<const char*>(
+                sqlite3_column_text(statement.get(), 1)
+            );
+        // ... 类似取出其他列
+```
+
+- 按列索引取出数据，`sqlite3_column_int64` 取整数，`sqlite3_column_text` 取字符串（返回 `const unsigned char*`，强转为 `const char*`）。
+- `account_username` 直接用函数参数赋值。
+
+```cpp
+        messages.push_back(std::move(message));
+    }
+```
+
+- 将消息对象加入向量（移动语义）。
+
+```cpp
+    std::reverse(messages.begin(), messages.end());
+    return true;
+}
+```
+
+- 因为查询是降序（最新在前），但我们希望返回的消息按时间升序（最旧在前），所以反转整个向量。
+
+---
+
+#### 7. 获取最近群聊消息 `recent_group_messages`
+
+与上述类似，表为 `group_messages`，查询条件为 `account_username` 和 `group_name`，列少了 `recipient_username`。逻辑完全一致。
+
+---
+
+#### 8. 缓存文件传输记录 `cache_file_transfer`
+
+```cpp
+bool SqliteClient::cache_file_transfer(
+    const LocalFileTransfer& file,
+    std::string& error
+) {
+    std::lock_guard<std::mutex> lock(mutex_);
+```
+
+- 加锁。
+
+```cpp
+    static constexpr const char* sql =
+        "INSERT INTO file_transfers("
+        "account_username,server_transfer_id,scope,"
+        "peer_username,group_name,sender_username,"
+        "file_name,local_path,file_size,sha256_hex,"
+        "received_at_unix_ms,outgoing"
+        ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(account_username,server_transfer_id) "
+        "DO UPDATE SET "
+        "scope=excluded.scope,"
+        "peer_username=excluded.peer_username,"
+        "group_name=excluded.group_name,"
+        "sender_username=excluded.sender_username,"
+        "file_name=excluded.file_name,"
+        "local_path=excluded.local_path,"
+        "file_size=excluded.file_size,"
+        "sha256_hex=excluded.sha256_hex,"
+        "received_at_unix_ms=excluded.received_at_unix_ms,"
+        "outgoing=excluded.outgoing";
+```
+
+- SQL 插入，冲突时更新所有字段（除了主键），不涉及 MIN/MAX 聚合，直接覆盖。
+
+```cpp
+    sqlite3_stmt* raw_statement = nullptr;
+    if (sqlite3_prepare_v2(...) != SQLITE_OK) { ... }
+    StatementPtr statement(...);
+```
+
+- 准备。
+
+```cpp
+    const bool bound =
+        bind_text(statement.get(), 1, file.account_username) &&
+        sqlite3_bind_int64(...) == SQLITE_OK &&  // server_transfer_id
+        bind_text(statement.get(), 3, file.scope) &&
+        bind_text(statement.get(), 4, file.peer_username) &&
+        bind_text(statement.get(), 5, file.group_name) &&
+        bind_text(statement.get(), 6, file.sender_username) &&
+        bind_text(statement.get(), 7, file.file_name) &&
+        bind_text(statement.get(), 8, file.local_path) &&
+        sqlite3_bind_int64(...) == SQLITE_OK &&  // file_size
+        bind_text(statement.get(), 10, file.sha256_hex) &&
+        sqlite3_bind_int64(...) == SQLITE_OK &&  // received_at_unix_ms
+        sqlite3_bind_int(...) == SQLITE_OK;      // outgoing
+```
+
+- 绑定所有参数，注意索引从1到12。
+
+```cpp
+    if (!bound) { error = sqlite_error(database_); return false; }
+    if (sqlite3_step(statement.get()) != SQLITE_DONE) { ... }
+    return true;
+}
+```
+
+- 执行并检查。
+
+---
+
+#### 9. 获取最近文件传输记录 `recent_file_transfers`
+
+```cpp
+bool SqliteClient::recent_file_transfers(
+    const std::string& account_username,
+    std::size_t count,
+    std::vector<LocalFileTransfer>& files,
+    std::string& error
+) {
+    std::lock_guard<std::mutex> lock(mutex_);
+```
+
+- 加锁。
+
+```cpp
+    static constexpr const char* sql =
+        "SELECT server_transfer_id,scope,peer_username,"
+        "group_name,sender_username,file_name,local_path,"
+        "file_size,sha256_hex,received_at_unix_ms,outgoing "
+        "FROM file_transfers "
+        "WHERE account_username=? "
+        "ORDER BY server_transfer_id DESC LIMIT ?";
+```
+
+- 查询某个账户最近的文件传输记录，按 `server_transfer_id` 降序。
+
+```cpp
+    // 准备、绑定
+    if (!bind_text(...) || sqlite3_bind_int64(...) != SQLITE_OK) { ... }
+```
+
+- 绑定两个参数。
+
+```cpp
+    files.clear();
+    while (true) {
+        int result = sqlite3_step(statement.get());
+        // 处理行
+    }
+    std::reverse(files.begin(), files.end());
+    return true;
+}
+```
+
+- 循环读取，填充 `LocalFileTransfer` 结构。注意这里使用了 `column_text` lambda 来处理可能为 NULL 的文本列（返回空字符串）。最后反转顺序。
+
+---
+
+#### 10. 统计信息 `stats`
+
+```cpp
+bool SqliteClient::stats(
+    const std::string& account_username,
+    LocalCacheStats& stats_value,
+    std::string& error
+) {
+    std::lock_guard<std::mutex> lock(mutex_);
+```
+
+- 加锁。
+
+```cpp
+    static constexpr const char* sql =
+        "SELECT "
+        "(SELECT COUNT(*) FROM private_messages "
+        "WHERE account_username=?),"
+        "(SELECT COUNT(*) FROM group_messages "
+        "WHERE account_username=?),"
+        "(SELECT COUNT(*) FROM file_transfers "
+        "WHERE account_username=?)";
+```
+
+- 一条 SQL 返回三个子查询的结果，分别统计私聊、群聊、文件记录数。
+
+```cpp
+    sqlite3_stmt* raw_statement = nullptr;
+    if (sqlite3_prepare_v2(...) != SQLITE_OK) { ... }
+    StatementPtr statement(...);
+```
+
+- 准备。
+
+```cpp
+    if (!bind_text(statement.get(), 1, account_username) ||
+        !bind_text(statement.get(), 2, account_username) ||
+        !bind_text(statement.get(), 3, account_username)) {
+        error = sqlite_error(database_);
+        return false;
+    }
+```
+
+- 三个占位符都绑定同一个用户名。
+
+```cpp
+    if (sqlite3_step(statement.get()) != SQLITE_ROW) {
+        error = sqlite_error(database_);
+        return false;
+    }
+```
+
+- 执行，期望至少有一行结果（因为聚合查询总是返回一行）。
+
+```cpp
+    stats_value.private_messages =
+        static_cast<std::size_t>(
+            sqlite3_column_int64(statement.get(), 0)
+        );
+    // 类似取第1、2列
+    return true;
+}
+```
+
+- 取出三列整数值并赋值给输出结构。
+
+---
+
+#### 11. 执行任意 SQL `execute`
+
+```cpp
+bool SqliteClient::execute(
+    const std::string& sql,
+    std::string& error
+) {
+    char* raw_error = nullptr;
+
+    const int result = sqlite3_exec(
+        database_,
+        sql.c_str(),
+        nullptr,
+        nullptr,
+        &raw_error
+    );
+
+    if (result == SQLITE_OK) {
+        return true;
+    }
+
+    error =
+        raw_error != nullptr
+            ? raw_error
+            : sqlite_error(database_);
+
+    sqlite3_free(raw_error);
+    return false;
+}
+```
+
+- 使用 `sqlite3_exec` 执行非查询 SQL（如创建表、PRAGMA 等）。
+- `raw_error` 接收错误信息（如果有），成功时 `sqlite3_exec` 返回 `SQLITE_OK`，否则构造错误字符串并释放 `raw_error`。
+
+---
+
+#### 12. 初始化表结构 `initialize_schema`
+
+```cpp
+bool SqliteClient::initialize_schema(
+    std::string& error
+) {
+    static constexpr const char* schema = R"SQL(
+PRAGMA journal_mode=WAL;
+PRAGMA synchronous=NORMAL;
+PRAGMA foreign_keys=ON;
+
+CREATE TABLE IF NOT EXISTS private_messages (
+    account_username TEXT NOT NULL,
+    server_message_id INTEGER NOT NULL,
+    peer_username TEXT NOT NULL,
+    sender_username TEXT NOT NULL,
+    recipient_username TEXT NOT NULL,
+    content TEXT NOT NULL,
+    received_at_unix_ms INTEGER NOT NULL,
+    outgoing INTEGER NOT NULL CHECK (outgoing IN (0,1)),
+    offline_delivery INTEGER NOT NULL
+        CHECK (offline_delivery IN (0,1)),
+    PRIMARY KEY (account_username, server_message_id)
+);
+
+CREATE INDEX IF NOT EXISTS
+idx_local_private_peer
+ON private_messages(
+    account_username,
+    peer_username,
+    server_message_id
+);
+
+-- 类似定义 group_messages 和 file_transfers 表及索引
+)SQL";
+
+    return execute(schema, error);
+}
+```
+
+- 使用原始字符串字面量 `R"SQL(...)SQL"` 嵌入多行 SQL。
+- 设置 PRAGMA：`journal_mode=WAL` 启用预写日志提高并发；`synchronous=NORMAL` 平衡性能与安全；`foreign_keys=ON` 启用外键约束（虽然本表未用）。
+- 创建三个表，每个表都有主键和检查约束，并创建索引以优化查询。
+- 最后调用 `execute` 执行这些 SQL。
+
+---
+
+#### 13. 关闭数据库（内部）`close_locked`
+
+```cpp
+void SqliteClient::close_locked() {
+    if (database_ != nullptr) {
+        sqlite3_close(database_);
+        database_ = nullptr;
+    }
+
+    database_path_.clear();
+}
+```
+
+- 前提：调用时已持有锁（由 `open` 和析构函数确保）。
+- 若数据库连接非空，调用 `sqlite3_close` 关闭，并置空指针。
+- 清空保存的路径字符串。
+
+---
+
+#### 📦 新增内容概览
+
+
+
+- **两个数据表**：`pending_uploads`（待上传文件队列）和 `partial_downloads`（未完成的下载任务）
+- **六个成员函数**：
+  - `save_pending_upload` — 保存一条待上传记录
+  - `list_pending_uploads` — 列出某账号的所有待上传记录
+  - `remove_pending_upload` — 删除指定的待上传记录
+  - `save_partial_download` — 保存一个未完成的下载任务
+  - `get_partial_download` — 根据传输 ID 获取某个下载任务
+  - `remove_partial_download` — 删除指定的下载任务
+
+这些新增功能支持**断点续传**和**离线文件上传队列**的管理。
+
+---
+
+#### 🗃️ 新增表结构（在 `initialize_schema` 中）
+
+新增的两张表定义如下（位于 `initialize_schema` 末尾）：
+
+#### 1. `pending_uploads` 表
+
+```sql
+CREATE TABLE IF NOT EXISTS pending_uploads (
+    account_username TEXT NOT NULL,
+    transfer_token TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    target TEXT NOT NULL,
+    source_path TEXT NOT NULL,
+    file_name TEXT NOT NULL,
+    file_size INTEGER NOT NULL,
+    sha256_hex TEXT NOT NULL,
+    created_at_unix_ms INTEGER NOT NULL,
+    PRIMARY KEY (account_username, transfer_token)
+);
+```
+
+- **account_username**：所属账户
+- **transfer_token**：服务端返回的传输令牌（唯一标识一次上传）
+- **scope**：传输范围（如 `"private"` 或 `"group"`）
+- **target**：目标（私聊时为对方用户名，群聊时为群组名）
+- **source_path**：本地待上传文件的绝对路径
+- **file_name**：原始文件名
+- **file_size**：文件大小（字节）
+- **sha256_hex**：文件的 SHA-256 哈希（用于去重和校验）
+- **created_at_unix_ms**：任务创建时间（毫秒时间戳）
+- **主键**：`(account_username, transfer_token)` 确保唯一
+
+同时创建了索引：
+
+```sql
+CREATE INDEX IF NOT EXISTS
+idx_pending_uploads_account
+ON pending_uploads(
+    account_username,
+    created_at_unix_ms,
+    transfer_token
+);
+```
+
+该索引用于加速按账户查询，并按创建时间排序。
+
+---
+
+#### 2. `partial_downloads` 表
+
+```sql
+CREATE TABLE IF NOT EXISTS partial_downloads (
+    account_username TEXT NOT NULL,
+    server_transfer_id INTEGER NOT NULL,
+    scope TEXT NOT NULL,
+    sender_username TEXT NOT NULL,
+    group_name TEXT NOT NULL DEFAULT '',
+    file_name TEXT NOT NULL,
+    temp_path TEXT NOT NULL,
+    file_size INTEGER NOT NULL,
+    sha256_hex TEXT NOT NULL,
+    PRIMARY KEY (account_username, server_transfer_id)
+);
+```
+
+- **account_username**：所属账户
+- **server_transfer_id**：服务端传输 ID（唯一标识一次下载）
+- **scope**：传输范围
+- **sender_username**：发送者
+- **group_name**：群组名（私聊时为空字符串）
+- **file_name**：文件名
+- **temp_path**：本地临时文件路径（已下载的部分内容）
+- **file_size**：文件总大小
+- **sha256_hex**：文件哈希
+- **主键**：`(account_username, server_transfer_id)`
+
+该表没有额外索引，但主键已能高效查询。
+
+
+
+---
+
+#### 1. `save_pending_upload`
+
+**功能**：插入或更新一条待上传记录（`UPSERT`）。
+
+```cpp
+bool SqliteClient::save_pending_upload(
+    const LocalPendingUpload& upload,
+    std::string& error
+) {
+    std::lock_guard<std::mutex> lock(
+        mutex_
+    );
+```
+- 加互斥锁，确保线程安全。
+
+```cpp
+    static constexpr const char* sql =
+        "INSERT INTO pending_uploads("
+        "account_username,transfer_token,scope,target,"
+        "source_path,file_name,file_size,sha256_hex,"
+        "created_at_unix_ms"
+        ") VALUES(?,?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(account_username,transfer_token) "
+        "DO UPDATE SET "
+        "scope=excluded.scope,"
+        "target=excluded.target,"
+        "source_path=excluded.source_path,"
+        "file_name=excluded.file_name,"
+        "file_size=excluded.file_size,"
+        "sha256_hex=excluded.sha256_hex,"
+        "created_at_unix_ms=excluded.created_at_unix_ms";
+```
+- 定义 SQL 语句，9 个占位符。
+- 当主键冲突时（同一账户、同一 `transfer_token` 已存在），则更新所有字段（除主键外）为新值，即覆盖旧的记录。
+
+```cpp
+    sqlite3_stmt* raw_statement =
+        nullptr;
+
+    if (sqlite3_prepare_v2(
+            database_,
+            sql,
+            -1,
+            &raw_statement,
+            nullptr
+        ) != SQLITE_OK) {
+        error =
+            sqlite_error(database_);
+        return false;
+    }
+```
+- 准备 SQL 语句，若失败则获取错误并返回。
+
+```cpp
+    StatementPtr statement(
+        raw_statement,
+        sqlite3_finalize
+    );
+```
+- 用智能指针包装，确保自动 `sqlite3_finalize`。
+
+```cpp
+    const bool bound =
+        bind_text(
+            statement.get(),
+            1,
+            upload.account_username
+        ) &&
+        bind_text(
+            statement.get(),
+            2,
+            upload.transfer_token
+        ) &&
+        bind_text(
+            statement.get(),
+            3,
+            upload.scope
+        ) &&
+        bind_text(
+            statement.get(),
+            4,
+            upload.target
+        ) &&
+        bind_text(
+            statement.get(),
+            5,
+            upload.source_path
+        ) &&
+        bind_text(
+            statement.get(),
+            6,
+            upload.file_name
+        ) &&
+        sqlite3_bind_int64(
+            statement.get(),
+            7,
+            static_cast<sqlite3_int64>(
+                upload.file_size
+            )
+        ) == SQLITE_OK &&
+        bind_text(
+            statement.get(),
+            8,
+            upload.sha256_hex
+        ) &&
+        sqlite3_bind_int64(
+            statement.get(),
+            9,
+            static_cast<sqlite3_int64>(
+                upload.created_at_unix_ms
+            )
+        ) == SQLITE_OK;
+```
+- 依次绑定所有参数，索引 1~9：
+  - 1~6 是字符串，使用 `bind_text`
+  - 7 是 `file_size`（无符号整型，转为 `sqlite3_int64`）
+  - 8 是 SHA256 字符串
+  - 9 是创建时间（`int64_t`）
+- `bound` 为 `true` 表示全部绑定成功。
+
+```cpp
+    if (!bound) {
+        error =
+            sqlite_error(database_);
+        return false;
+    }
+
+    if (sqlite3_step(
+            statement.get()
+        ) != SQLITE_DONE) {
+        error =
+            sqlite_error(database_);
+        return false;
+    }
+
+    return true;
+}
+```
+- 若绑定失败，取错误信息返回。
+- 执行语句，若结果不是 `SQLITE_DONE` 则报错，否则成功返回。
+
+---
+
+#### 2. `list_pending_uploads`
+
+**功能**：列出某账户的所有待上传任务（按创建时间升序，令牌作为次排序）。
+
+```cpp
+bool SqliteClient::list_pending_uploads(
+    const std::string& account_username,
+    std::vector<LocalPendingUpload>& uploads,
+    std::string& error
+) {
+    std::lock_guard<std::mutex> lock(
+        mutex_
+    );
+```
+- 加锁。
+
+```cpp
+    static constexpr const char* sql =
+        "SELECT transfer_token,scope,target,source_path,"
+        "file_name,file_size,sha256_hex,created_at_unix_ms "
+        "FROM pending_uploads "
+        "WHERE account_username=? "
+        "ORDER BY created_at_unix_ms,transfer_token";
+```
+- 查询所有字段（除了 `account_username`，因为查询条件已知），并按创建时间升序、令牌升序排列，保证稳定的输出顺序。
+
+```cpp
+    sqlite3_stmt* raw_statement =
+        nullptr;
+
+    if (sqlite3_prepare_v2(
+            database_,
+            sql,
+            -1,
+            &raw_statement,
+            nullptr
+        ) != SQLITE_OK) {
+        error =
+            sqlite_error(database_);
+        return false;
+    }
+
+    StatementPtr statement(
+        raw_statement,
+        sqlite3_finalize
+    );
+```
+- 准备语句并包装。
+
+```cpp
+    if (!bind_text(
+            statement.get(),
+            1,
+            account_username
+        )) {
+        error =
+            sqlite_error(database_);
+        return false;
+    }
+```
+- 绑定账户名（唯一参数）。
+
+```cpp
+    uploads.clear();
+```
+- 清空输出向量，准备填入新数据。
+
+```cpp
+    auto column_text =
+        [&](int column) {
+            const unsigned char* value =
+                sqlite3_column_text(
+                    statement.get(),
+                    column
+                );
+
+            return value == nullptr
+                ? std::string()
+                : std::string(
+                      reinterpret_cast<
+                          const char*
+                      >(value)
+                  );
+        };
+```
+- 定义一个 lambda，用于安全地从 `sqlite3_column_text` 获取字符串，若为 `NULL` 则返回空字符串（`pending_uploads` 所有字段均为 `NOT NULL`，但此处通用处理）。
+
+```cpp
+    while (true) {
+        const int result =
+            sqlite3_step(
+                statement.get()
+            );
+
+        if (result == SQLITE_DONE) {
+            break;
+        }
+
+        if (result != SQLITE_ROW) {
+            error =
+                sqlite_error(database_);
+            return false;
+        }
+```
+- 循环取行，直到结束或出错。
+
+```cpp
+        LocalPendingUpload upload;
+        upload.account_username =
+            account_username;
+        upload.transfer_token =
+            column_text(0);
+        upload.scope =
+            column_text(1);
+        upload.target =
+            column_text(2);
+        upload.source_path =
+            column_text(3);
+        upload.file_name =
+            column_text(4);
+        upload.file_size =
+            static_cast<std::uint64_t>(
+                sqlite3_column_int64(
+                    statement.get(),
+                    5
+                )
+            );
+        upload.sha256_hex =
+            column_text(6);
+        upload.created_at_unix_ms =
+            static_cast<std::int64_t>(
+                sqlite3_column_int64(
+                    statement.get(),
+                    7
+                )
+            );
+
+        uploads.push_back(
+            std::move(upload)
+        );
+    }
+```
+- 从列索引 0~7 依次取出各字段值，填充 `LocalPendingUpload` 对象，然后移动加入向量。
+
+```cpp
+    return true;
+}
+```
+- 成功返回。
+
+---
+
+#### 3. `remove_pending_upload`
+
+**功能**：根据账户和传输令牌删除一条待上传记录。
+
+```cpp
+bool SqliteClient::remove_pending_upload(
+    const std::string& account_username,
+    const std::string& transfer_token,
+    std::string& error
+) {
+    std::lock_guard<std::mutex> lock(
+        mutex_
+    );
+```
+- 加锁。
+
+```cpp
+    static constexpr const char* sql =
+        "DELETE FROM pending_uploads "
+        "WHERE account_username=? "
+        "AND transfer_token=?";
+```
+- DELETE 语句，两个条件。
+
+```cpp
+    sqlite3_stmt* raw_statement =
+        nullptr;
+
+    if (sqlite3_prepare_v2(
+            database_,
+            sql,
+            -1,
+            &raw_statement,
+            nullptr
+        ) != SQLITE_OK) {
+        error =
+            sqlite_error(database_);
+        return false;
+    }
+
+    StatementPtr statement(
+        raw_statement,
+        sqlite3_finalize
+    );
+```
+- 准备语句并包装。
+
+```cpp
+    if (!bind_text(
+            statement.get(),
+            1,
+            account_username
+        ) ||
+        !bind_text(
+            statement.get(),
+            2,
+            transfer_token
+        )) {
+        error =
+            sqlite_error(database_);
+        return false;
+    }
+```
+- 绑定两个参数。
+
+```cpp
+    if (sqlite3_step(
+            statement.get()
+        ) != SQLITE_DONE) {
+        error =
+            sqlite_error(database_);
+        return false;
+    }
+
+    return true;
+}
+```
+- 执行，若成功则返回 true（即使没有删除任何行，SQLite 也会返回 `SQLITE_DONE`，因为 DELETE 操作成功，受影响行数可能为 0，但这不是错误，所以调用者不关心行数）。
+
+---
+
+#### 4. `save_partial_download`
+
+**功能**：保存一个未完成的下载任务（断点续传信息）。
+
+```cpp
+bool SqliteClient::save_partial_download(
+    const LocalPartialDownload& download,
+    std::string& error
+) {
+    std::lock_guard<std::mutex> lock(
+        mutex_
+    );
+```
+- 加锁。
+
+```cpp
+    static constexpr const char* sql =
+        "INSERT INTO partial_downloads("
+        "account_username,server_transfer_id,scope,"
+        "sender_username,group_name,file_name,temp_path,"
+        "file_size,sha256_hex"
+        ") VALUES(?,?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(account_username,server_transfer_id) "
+        "DO UPDATE SET "
+        "scope=excluded.scope,"
+        "sender_username=excluded.sender_username,"
+        "group_name=excluded.group_name,"
+        "file_name=excluded.file_name,"
+        "temp_path=excluded.temp_path,"
+        "file_size=excluded.file_size,"
+        "sha256_hex=excluded.sha256_hex";
+```
+- SQL 语句，9 个字段。主键冲突时更新所有非主键字段（覆盖旧任务）。
+
+```cpp
+    sqlite3_stmt* raw_statement =
+        nullptr;
+
+    if (sqlite3_prepare_v2(
+            database_,
+            sql,
+            -1,
+            &raw_statement,
+            nullptr
+        ) != SQLITE_OK) {
+        error =
+            sqlite_error(database_);
+        return false;
+    }
+
+    StatementPtr statement(
+        raw_statement,
+        sqlite3_finalize
+    );
+```
+- 准备语句。
+
+```cpp
+    const bool bound =
+        bind_text(
+            statement.get(),
+            1,
+            download.account_username
+        ) &&
+        sqlite3_bind_int64(
+            statement.get(),
+            2,
+            static_cast<sqlite3_int64>(
+                download.server_transfer_id
+            )
+        ) == SQLITE_OK &&
+        bind_text(
+            statement.get(),
+            3,
+            download.scope
+        ) &&
+        bind_text(
+            statement.get(),
+            4,
+            download.sender_username
+        ) &&
+        bind_text(
+            statement.get(),
+            5,
+            download.group_name
+        ) &&
+        bind_text(
+            statement.get(),
+            6,
+            download.file_name
+        ) &&
+        bind_text(
+            statement.get(),
+            7,
+            download.temp_path
+        ) &&
+        sqlite3_bind_int64(
+            statement.get(),
+            8,
+            static_cast<sqlite3_int64>(
+                download.file_size
+            )
+        ) == SQLITE_OK &&
+        bind_text(
+            statement.get(),
+            9,
+            download.sha256_hex
+        );
+```
+- 绑定 9 个参数：第 2 个是 `server_transfer_id`（`uint64_t`），第 8 个是 `file_size`，其余为字符串。
+
+```cpp
+    if (!bound) {
+        error =
+            sqlite_error(database_);
+        return false;
+    }
+
+    if (sqlite3_step(
+            statement.get()
+        ) != SQLITE_DONE) {
+        error =
+            sqlite_error(database_);
+        return false;
+    }
+
+    return true;
+}
+```
+- 检查绑定，执行，返回结果。
+
+---
+
+#### 5. `get_partial_download`
+
+**功能**：根据账户和传输 ID 查询一个下载任务，结果存入 `std::optional`。
+
+```cpp
+bool SqliteClient::get_partial_download(
+    const std::string& account_username,
+    std::uint64_t transfer_id,
+    std::optional<LocalPartialDownload>& download,
+    std::string& error
+) {
+    std::lock_guard<std::mutex> lock(
+        mutex_
+    );
+```
+- 加锁。
+
+```cpp
+    static constexpr const char* sql =
+        "SELECT scope,sender_username,group_name,file_name,"
+        "temp_path,file_size,sha256_hex "
+        "FROM partial_downloads "
+        "WHERE account_username=? "
+        "AND server_transfer_id=? "
+        "LIMIT 1";
+```
+- 查询除主键外的所有字段，条件是两个主键列，`LIMIT 1` 确保最多一条结果。
+
+```cpp
+    sqlite3_stmt* raw_statement =
+        nullptr;
+
+    if (sqlite3_prepare_v2(
+            database_,
+            sql,
+            -1,
+            &raw_statement,
+            nullptr
+        ) != SQLITE_OK) {
+        error =
+            sqlite_error(database_);
+        return false;
+    }
+
+    StatementPtr statement(
+        raw_statement,
+        sqlite3_finalize
+    );
+```
+- 准备。
+
+```cpp
+    if (!bind_text(
+            statement.get(),
+            1,
+            account_username
+        ) ||
+        sqlite3_bind_int64(
+            statement.get(),
+            2,
+            static_cast<sqlite3_int64>(
+                transfer_id
+            )
+        ) != SQLITE_OK) {
+        error =
+            sqlite_error(database_);
+        return false;
+    }
+```
+- 绑定两个参数。
+
+```cpp
+    const int result =
+        sqlite3_step(
+            statement.get()
+        );
+
+    if (result == SQLITE_DONE) {
+        download.reset();
+        return true;
+    }
+```
+- 第一次 `step`，如果没找到（`DONE`），则重置 `optional` 为空，返回成功。
+
+```cpp
+    if (result != SQLITE_ROW) {
+        error =
+            sqlite_error(database_);
+        return false;
+    }
+```
+- 如果既不是 `DONE` 也不是 `ROW`，则为错误。
+
+```cpp
+    auto column_text =
+        [&](int column) {
+            const unsigned char* value =
+                sqlite3_column_text(
+                    statement.get(),
+                    column
+                );
+
+            return value == nullptr
+                ? std::string()
+                : std::string(
+                      reinterpret_cast<
+                          const char*
+                      >(value)
+                  );
+        };
+```
+- 同前，安全取字符串 lambda。
+
+```cpp
+    LocalPartialDownload item;
+    item.server_transfer_id =
+        transfer_id;
+    item.account_username =
+        account_username;
+    item.scope =
+        column_text(0);
+    item.sender_username =
+        column_text(1);
+    item.group_name =
+        column_text(2);
+    item.file_name =
+        column_text(3);
+    item.temp_path =
+        column_text(4);
+    item.file_size =
+        static_cast<std::uint64_t>(
+            sqlite3_column_int64(
+                statement.get(),
+                5
+            )
+        );
+    item.sha256_hex =
+        column_text(6);
+
+    download =
+        std::move(item);
+    return true;
+}
+```
+- 从列索引 0~6 取出各字段，构造 `LocalPartialDownload` 对象，并将其移动赋值给 `optional`，最后返回成功。
+
+---
+
+#### 6. `remove_partial_download`
+
+**功能**：根据账户和传输 ID 删除一个下载任务。
+
+```cpp
+bool SqliteClient::remove_partial_download(
+    const std::string& account_username,
+    std::uint64_t transfer_id,
+    std::string& error
+) {
+    std::lock_guard<std::mutex> lock(
+        mutex_
+    );
+```
+- 加锁。
+
+```cpp
+    static constexpr const char* sql =
+        "DELETE FROM partial_downloads "
+        "WHERE account_username=? "
+        "AND server_transfer_id=?";
+```
+- DELETE 语句。
+
+```cpp
+    sqlite3_stmt* raw_statement =
+        nullptr;
+
+    if (sqlite3_prepare_v2(
+            database_,
+            sql,
+            -1,
+            &raw_statement,
+            nullptr
+        ) != SQLITE_OK) {
+        error =
+            sqlite_error(database_);
+        return false;
+    }
+
+    StatementPtr statement(
+        raw_statement,
+        sqlite3_finalize
+    );
+```
+- 准备。
+
+```cpp
+    if (!bind_text(
+            statement.get(),
+            1,
+            account_username
+        ) ||
+        sqlite3_bind_int64(
+            statement.get(),
+            2,
+            static_cast<sqlite3_int64>(
+                transfer_id
+            )
+        ) != SQLITE_OK) {
+        error =
+            sqlite_error(database_);
+        return false;
+    }
+```
+- 绑定两个参数。
+
+```cpp
+    if (sqlite3_step(
+            statement.get()
+        ) != SQLITE_DONE) {
+        error =
+            sqlite_error(database_);
+        return false;
+    }
+
+    return true;
+}
+```
+- 执行并返回。
+
+---
+
+#### ✅ 小结
+
+新增的部分让 `SqliteClient` 具备了**管理上传队列**和**断点下载**的能力，具体来说：
+
+- **`pending_uploads` 表**存储了尚未完成的上传请求，应用可以在网络恢复后重新尝试上传，并提供进度持久化。
+- **`partial_downloads` 表**记录了已经下载了一部分文件的临时路径，便于后续继续下载，实现断点续传。
+
+这些新增操作都遵循了相同的线程安全、错误处理和 RAII 风格，与原有代码保持高度一致。
+
+
+
+#### 总结
+
+这段代码实现了线程安全的 SQLite 本地缓存层，提供了：
+- **打开/关闭** 数据库并自动创建目录和表结构。
+- **插入/更新** 消息和文件记录（使用 `INSERT ... ON CONFLICT DO UPDATE` 实现 upsert）。
+- **查询** 最近记录（按 `server_message_id` 倒序并反转升序）。
+- **统计** 各类记录数量。
+- 所有操作通过 `std::mutex` 保护，避免多线程竞态。
+- 使用 RAII 包装 `sqlite3_stmt*`，确保语句资源自动释放，避免泄露。
+
+每一步都严格检查 SQLite API 的返回值，并将错误信息通过 `error` 参数返回给调用者。
+
+
+
+### redis_client
+
+---
+
