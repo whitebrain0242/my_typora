@@ -1,3 +1,7 @@
+[TOC]
+
+
+
 ## src
 
 ### config
@@ -2058,9 +2062,163 @@ bool SqliteClient::remove_partial_download(
 
 每一步都严格检查 SQLite API 的返回值，并将错误信息通过 `error` 参数返回给调用者。
 
+### minimuduo
+
+#### NonCopyable
+
+```c++
+protected:
+    NonCopyable() = default;
+    ~NonCopyable() = default;
+
+    NonCopyable(const NonCopyable&) = delete;
+    NonCopyable& operator=(const NonCopyable&) = delete;
+};
+```
+
+-   **`private`（私有的）**：只有**类自己**的成员函数能访问。外界和子类都不能访问。
+-   **`protected`（受保护的）**：**类自己**和**它的子类（派生类）** 能访问。但**外界（普通代码）** 不能访问。
+-   **`public`（公有的）**：任何人都能访问。
+
+>   **规则**：只要程序员自己写了**任何**构造函数（无论是拷贝构造、移动构造，还是带参构造），编译器就**不再**自动生成“默认构造函数
+
+我们下面自己定义了删除拷贝构造函数和拷贝赋值运算符函数，那么系统就不会自己生成默认构造函数，我们就不能新创建对象了
+
+```
+NonCopyable b;//禁止了hhh
+```
+
+所以说，我们才需要主动写构造函数
+
+#### SocketOptions
+
+```c++
+bool configureTcpKeepAlive(
+    int socketFd,//哪一个连接？
+    int idleSeconds,//空闲等待时间：如果过l这个时间没有任何数据收发，操作系统开始发探测包检查对方是不是活着
+    int intervalSeconds,//探测重试间隔
+    int probeCount,//探测失败上限
+    std::string& error
+);
+```
+
+##### 为什么需要？
+
+你（服务器）和客户端建立了一个 TCP 连接，双方正在愉快地聊天。
+
+突然，**客户端电脑蓝屏死机了**，或者 **网线被拔掉了**。
+
+这时候，你作为服务器，**完全感知不到这件事**。因为 TCP 连接没有发送任何“再见”的包，你这边只会觉得“对方怎么不说话了呢？”，然后傻傻地等着。
+
+**这个“傻等”的后果很严重**：
+
+-   你的服务器内存里会一直保留着这个连接对象（文件描述符、缓冲区）。
+-   如果有几万个这样的“死连接”挂着，你的服务器内存就会爆掉，无法再服务新用户。
+
+##### 怎么做？
+
+“操作系统大哥，你帮我盯着这个连接。如果对方长时间不吭声（`idleSeconds`），你就主动发个探测包去戳一下它。如果戳了好几次（`probeCount`）它都没反应，你就赶紧告诉我这个程序，我好把这个死连接关掉。”
+
+它具体干了哪 4 件事？（把代码翻译成中文）
+
+1.  **开总闸**：`SO_KEEPALIVE` -> 把“帮我探测死连接”这个功能打开。
+2.  **设定多久开始查**：`TCP_KEEPIDLE` -> 空闲多少秒后开始探测（比如 60 秒没收到数据，就去戳一下）。
+3.  **设定多久查一次**：`TCP_KEEPINTVL` -> 戳了没反应，隔几秒再戳一下。
+4.  **设定查几次判死刑**：`TCP_KEEPCNT` -> 连续戳几次都没回应，就判定这个连接已经死了，操作系统会把错误告诉你的程序。
+
+特别重要的纠正：它不等于“心跳包”
+
+你可能会问：“那我程序里自己每隔几秒发个 Ping 不也行吗？”
+
+**这就是最关键的区别**：
+
+-   **程序发 Ping（应用层心跳）**：如果你的程序**卡死**了（比如死锁、CPU 100%），Ping 发不出去，服务器会发现。这检测的是“你的程序有没有挂”。
+-   **这个函数做的（内核保活）**：即使你的程序卡死了，**操作系统内核依然活得好好的**，它依然能发出探测包。如果客户端整个机器断电了，操作系统依然能检测到。
+
+**所以，这个函数查的是“物理线路通不通”和“对方操作系统有没有宕机”，而不是“对方程序有没有卡住”**
 
 
-### redis_client
 
----
 
+
+```c++
+bool configureTcpKeepAlive(
+    int socketFd,
+    int idleSeconds,
+    int intervalSeconds,
+    int probeCount,
+    std::string& error
+) {//开启保活检测，value是1
+    if (!setIntOption(
+            socketFd,
+            SOL_SOCKET,//socket层
+            SO_KEEPALIVE,
+            1,
+            "SO_KEEPALIVE",
+            error
+        )) {
+        return false;
+    }
+
+#ifdef TCP_KEEPIDLE
+    if (!setIntOption(
+            socketFd,
+            IPPROTO_TCP,//tcp层
+            TCP_KEEPIDLE,//宏
+            idleSeconds,
+            "TCP_KEEPIDLE",
+            error
+        )) {
+        return false;
+    }
+#endif
+
+#ifdef TCP_KEEPINTVL
+    if (!setIntOption(
+            socketFd,
+            IPPROTO_TCP,
+            TCP_KEEPINTVL,
+            intervalSeconds,
+            "TCP_KEEPINTVL",
+            error
+        )) {
+        return false;
+    }
+#endif
+
+#ifdef TCP_KEEPCNT
+    if (!setIntOption(
+            socketFd,
+            IPPROTO_TCP,
+            TCP_KEEPCNT,
+            probeCount,
+            "TCP_KEEPCNT",
+            error
+        )) {
+        return false;
+    }
+#endif
+
+    return true;
+}
+```
+
+
+
+| 宏名称          | 含义                       | 所属层级  |
+| :-------------- | :------------------------- | :-------- |
+| `SOL_SOCKET`    | “通用 Socket 层”的标识符   | Socket 层 |
+| `SO_KEEPALIVE`  | “开启保活功能”这个选项     | Socket 层 |
+| `IPPROTO_TCP`   | “TCP 协议层”的标识符       | TCP 层    |
+| `TCP_KEEPIDLE`  | “空闲多久开始探测”这个选项 | TCP 层    |
+| `TCP_KEEPINTVL` | “探测重试间隔”这个选项     | TCP 层    |
+| `TCP_KEEPCNT`   | “最大探测次数”这个选项     | TCP 层    |
+
+
+
+
+
+# question
+
+1.   NonCopyable中，使用protected有什么用？整体有什么作用？
+2.   
