@@ -1,0 +1,87 @@
+CHATROOM v8.4 VALIDATION LOG
+===============================================================================
+
+NEW FEATURES
+- friend direct-message blocking: implemented
+- private-file blocking: implemented
+- offline direct delivery filtering: implemented
+- server application heartbeat PING/PONG: implemented
+- client automatic PONG: implemented
+- server heartbeat timeout: implemented
+- client heartbeat timeout: implemented
+- Linux TCP keepalive fallback: implemented
+
+DECOUPLING
+- ClientSession extracted: yes
+- ServerCommandRouter: yes
+- OnlineUserRegistry: yes
+- DirectMessagePolicy: yes
+- HeartbeatManager: yes
+- ChatServer route/block/heartbeat translation units: yes
+- client.cpp reduced to bootstrap: yes
+- ClientApp: yes
+- TlsClientTransport: yes
+- ClientHeartbeat: yes
+- client_file_transfer: yes
+- client_local_commands: yes
+- client_message_cache: yes
+
+REAL COMPILE / RUN
+- decoupled chat_client compile: PASS, 0 warnings
+- server source/link shape with external temporary generated-Protobuf API stub:
+  PASS, 0 warnings
+- heartbeat timeout integration: PASS
+- client TLS PING -> PONG: PASS
+- command router: PASS
+- Reactor smoke: PASS
+- Reactor round robin: PASS
+- cross-thread send/eventfd: PASS
+- TLS Reactor echo: PASS
+- SQLite regression: PASS
+- Redis fake-server regression: PASS
+- resumable file storage logic: PASS (external temporary protobuf API stub)
+- Buffer: PASS
+- Password: PASS
+- file_utils: PASS
+
+SOURCE CONTRACTS
+- friend block persistence contract: PASS
+- MySQL prepared-statement contract: PASS
+- mysql_real_escape_string: 0
+- mysql_query/mysql_real_query: 0
+- std::to_string SQL assembly in mysql_database.cpp: 0
+- custom protobuf codec source hits: 0
+
+SANITIZERS
+- new heartbeat integration ASan+UBSan+leak detection: PASS
+
+CMAKE ENVIRONMENT LIMITATION
+- mysqlclient: found
+- hiredis: found
+- sqlite3: found
+- OpenSSL: found
+- Protobuf dev package: missing
+- configure stops at find_package(Protobuf REQUIRED), as intended
+
+MYSQL ENVIRONMENT LIMITATION
+- no mysqld/mariadbd/mysql runtime in this environment
+- no live friend_blocks CRUD E2E claim
+
+TARGET MACHINE
+-------------------------------------------------------------------------------
+sudo apt install -y \
+  build-essential cmake pkg-config \
+  default-libmysqlclient-dev \
+  libssl-dev libhiredis-dev libsqlite3-dev \
+  protobuf-compiler libprotobuf-dev redis-server
+
+sudo mysql chatroom < sql/006_create_friend_blocks.sql
+
+./scripts/generate_dev_tls_cert.sh
+
+cp config/tls_server.conf.example config/tls_server.conf
+cp config/tls_client.conf.example config/tls_client.conf
+
+cmake -S . -B build
+cmake --build build
+ctest --test-dir build --output-on-failure
