@@ -2214,9 +2214,306 @@ bool configureTcpKeepAlive(
 | `TCP_KEEPINTVL` | “探测重试间隔”这个选项     | TCP 层    |
 | `TCP_KEEPCNT`   | “最大探测次数”这个选项     | TCP 层    |
 
+#### Buffer
 
 
 
+---
+
+##### 一、获取缓冲区状态（三个 getter）
+
+`std::size_t readableBytes() const noexcept`
+
+```cpp
+return writerIndex_ - readerIndex_;
+```
+- **作用**：返回当前可读字节数。
+- **实现**：直接用 `writerIndex_` 减去 `readerIndex_`，简单高效。
+
+`std::size_t writableBytes() const noexcept`
+
+```cpp
+return buffer_.size() - writerIndex_;
+```
+- **作用**：返回当前可写空间大小（尾部空闲字节数）。
+- **实现**：用总容量 `buffer_.size()` 减去 `writerIndex_`。
+
+`std::size_t prependableBytes() const noexcept`
+
+```cpp
+return readerIndex_;
+```
+- **作用**：返回前置空间大小（即头部已消费或预留的空闲字节数）。
+- **实现**：直接返回 `readerIndex_`，因为从下标 0 到 `readerIndex_ - 1` 都是空闲的（包括最初预留的 8 个字节和已消费的数据）。
+
+---
+
+##### 二、获取内部指针（零拷贝读取/写入）
+
+`const char* peek() const noexcept`
+
+```cpp
+return begin() + readerIndex_;
+```
+- **作用**：返回可读数据的起始指针（只读）。
+- **实现**：底层数组起始地址 + `readerIndex_`。
+
+`char* beginWrite() noexcept`
+
+```cpp
+return begin() + writerIndex_;
+```
+- **作用**：返回可写区域的起始指针（可写），允许外部直接向该位置写入数据。
+
+`const char* beginWrite() const noexcept`
+
+- const 版本，返回只读指针。
+
+---
+
+##### 三、消费数据（retrieve 系列）
+
+`void retrieve(std::size_t length)`
+
+```cpp
+assert(length <= readableBytes());
+if (length < readableBytes()) {
+    readerIndex_ += length;
+} else {
+    retrieveAll();
+}
+```
+- assert:**运行时断言（Runtime Assertion）**，它的作用是**在程序运行时强行检查一个条件，如果条件不成立（即 `length` 大于当前可读数据量），程序会立即崩溃终止，并输出错误信息**
+
+- **. 只在 Debug 模式下生效**
+
+    `assert` 是一个**宏**，它由预处理器控制。如果你在编译时**没有**定义 `NDEBUG` 宏（通常对应 Debug 编译配置），`assert` 会生效。
+    如果你**定义**了 `NDEBUG`（通常对应 Release 编译配置），**这一整行代码会被预处理器直接移除**，不会生成任何机器码，对性能零影响。
+
+    **失败时会主动终止程序**
+
+    一旦条件为假，`assert` 会调用 `abort()` 函数，并输出类似这样的信息：
+
+    ```
+    Assertion failed: length <= readableBytes(), file Buffer.cpp, line 123
+    ```
+
+    这让程序员能迅速定位到出错的位置。
+
+- **作用**：丢弃 `length` 字节的数据。
+
+- **实现**：
+  
+  - 如果 `length` 小于可读字节数，则简单地将 `readerIndex_` 向前移动 `length`。
+  - 如果 `length` 等于或大于可读字节数，则直接调用 `retrieveAll()` 重置缓冲区（避免 `readerIndex_` 超出 `writerIndex_`）。
+
+`void retrieveUntil(const char* end)`
+
+```cpp
+assert(peek() <= end);
+assert(end <= beginWrite());
+retrieve(static_cast<std::size_t>(end - peek()));
+```
+- **作用**：丢弃从 `peek()` 到 `end` 之间的所有数据。
+- **实现**：计算需要丢弃的长度 `end - peek()`，然后调用 `retrieve(length)`。
+
+`void retrieveAll() noexcept`
+
+```cpp
+readerIndex_ = kCheapPrepend;
+writerIndex_ = kCheapPrepend;
+```
+- **作用**：清空缓冲区（丢弃所有可读数据）。
+- **实现**：将两个指针都重置为 `kCheapPrepend`，即 8。这样，头部预留空间依然保留，所有空间都变成可写空间。
+
+`std::string retrieveAsString(std::size_t length)`
+
+```cpp
+length = std::min(length, readableBytes());
+std::string result(peek(), length);
+retrieve(length);
+return result;
+```
+- **作用**：取出 `length` 字节数据，以 `std::string` 返回，并自动丢弃这些数据。
+- **实现**：先限制取出的长度不超过可读字节数，然后用 `peek()` 和 `length` 构造一个 `string`（拷贝），再调用 `retrieve(length)` 丢弃数据。
+
+`std::string retrieveAllAsString()`
+
+```cpp
+return retrieveAsString(readableBytes());
+```
+- **作用**：取出所有可读数据，返回 `std::string`，并清空缓冲区。
+
+---
+
+##### 四、查找辅助
+
+`const char* findEOL() const noexcept`
+
+```cpp
+const void* result = std::memchr(peek(), '\n', readableBytes());
+return static_cast<const char*>(result);
+```
+- **作用**：在可读数据中查找第一个 `\n`（换行符）的位置。
+- **实现**：调用 C 标准库 `memchr` 函数，从 `peek()` 开始搜索 `readableBytes()` 个字节。注意这里只找 `\n`，不找 `\r\n`，所以需要上层自行处理回车符（或者改进实现）。这是比较简单的实现，通常用于行协议。
+
+---
+
+##### 五、写入数据相关
+
+`void ensureWritableBytes(std::size_t length)`
+
+```cpp
+if (writableBytes() < length) {
+    makeSpace(length);
+}
+assert(writableBytes() >= length);
+```
+- **作用**：确保至少有 `length` 字节的可写空间，若不足则调用 `makeSpace` 进行扩容或搬移。
+- **实现**：先检查当前可写字节数，不足则调用 `makeSpace`，最后断言保证空间足够。
+
+`void hasWritten(std::size_t length)`
+
+```cpp
+assert(length <= writableBytes());
+writerIndex_ += length;
+```
+- **作用**：在外部向 `beginWrite()` 写入数据后，调用此函数将 `writerIndex_` 向前推进 `length`，确认数据已写入。
+- **实现**：先断言 `length` 不超过可写空间，然后直接累加 `writerIndex_`。
+
+`void append(const char* data, std::size_t length)`
+
+```cpp
+ensureWritableBytes(length);
+std::copy(data, data + length, beginWrite());
+hasWritten(length);
+```
+- **作用**：将 `data` 指向的 `length` 字节数据追加到缓冲区末尾。
+- **实现**：
+  1. 确保可写空间足够。
+  2. 用 `std::copy` 将数据拷贝到可写区域。
+  3. 调用 `hasWritten` 更新 `writerIndex_`。
+
+`void append(const std::string& data)`
+
+```cpp
+append(data.data(), data.size());
+```
+- **作用**：重载版本，追加 `std::string` 数据。
+
+---
+
+##### 六、与 Socket 的直接 I/O（关键函数）
+
+`ssize_t readFd(int fd, int* savedErrno)`
+
+这是最核心、最精妙的部分，它利用 **`readv` 系统调用（分散读）** 来最大化一次读取的数据量，减少系统调用次数。
+
+```cpp
+char extraBuffer[65536];               // 栈上临时缓冲区，64KB
+
+iovec vectors[2];                      // readv 需要两个缓冲区
+const std::size_t writable = writableBytes();
+
+vectors[0].iov_base = beginWrite();    // 第一块：Buffer 自身的可写区域
+vectors[0].iov_len = writable;
+vectors[1].iov_base = extraBuffer;     // 第二块：栈上额外缓冲区
+vectors[1].iov_len = sizeof(extraBuffer);
+
+const int vectorCount = writable < sizeof(extraBuffer) ? 2 : 1;
+const ssize_t bytesRead = ::readv(fd, vectors, vectorCount);
+```
+- **核心逻辑**：如果 `Buffer` 自身的可写空间小于 64KB，则一次调用 `readv` 同时读入两个位置：先填满 Buffer 自身，剩下的读入栈上的 `extraBuffer`。这样一次系统调用可以读取多达 `writable + 64KB` 的数据，极大提高效率。
+- **为什么用栈缓冲区？** 因为如果 Buffer 的可写空间很小（比如只剩几百字节），我们仍想一次读取大量数据，避免多次 `read` 调用。栈上的 `extraBuffer` 提供了额外的暂存空间。
+
+**处理读取结果：**
+```cpp
+if (bytesRead < 0) {
+    *savedErrno = errno;
+} else if (static_cast<std::size_t>(bytesRead) <= writable) {
+    writerIndex_ += static_cast<std::size_t>(bytesRead);   // 全部落入 Buffer 自身
+} else {
+    writerIndex_ = buffer_.size();                         // Buffer 自身已满
+    append(extraBuffer, static_cast<std::size_t>(bytesRead) - writable); // 剩余数据追加到 Buffer
+}
+return bytesRead;
+```
+- 如果读到的数据小于或等于 Buffer 的可写空间，全部直接写入 Buffer，更新 `writerIndex_`。
+- 如果读到的数据超过 Buffer 的可写空间，先将 Buffer 自身填满（`writerIndex_` 移到末尾），然后把 `extraBuffer` 中的剩余部分通过 `append` 追加到 Buffer（`append` 内部会调用 `ensureWritableBytes`，可能触发扩容或搬移）。
+- **这样设计的好处**：一次 `readv` 可以读完 socket 接收缓冲区中的所有数据，减少 `epoll` 循环次数。
+
+`ssize_t writeFd(int fd, int* savedErrno)`
+
+```cpp
+const ssize_t bytesWritten = ::write(fd, peek(), readableBytes());
+if (bytesWritten < 0) {
+    *savedErrno = errno;
+}
+return bytesWritten;
+```
+- **作用**：尝试将 Buffer 中的所有可读数据写入 socket。
+- **实现**：调用 `write` 系统调用，写入 `peek()` 起始的 `readableBytes()` 字节。如果写入成功，返回实际写入字节数；外部需要根据返回值调用 `retrieve` 来更新 `readerIndex_`。如果返回值小于 `readableBytes()`，说明 socket 发送缓冲区已满，需要等待 `EPOLLOUT` 事件。
+
+---
+
+##### 七、私有辅助函数
+
+`char* begin() noexcept`
+
+```cpp
+return buffer_.data();
+```
+- **作用**：返回底层 `vector<char>` 的起始地址。
+
+`const char* begin() const noexcept`
+
+const 版本。
+
+`void makeSpace(std::size_t length)`
+
+这是缓冲区的空间管理核心，决定是**搬移数据**还是**扩容**。
+
+```cpp
+if (writableBytes() + prependableBytes() < length + kCheapPrepend) {
+    buffer_.resize(writerIndex_ + length);
+    return;
+}
+```
+- **判断条件**：如果 **“尾部空间 + 前置空间”** 小于 **“需要空间 + 头部预留”**，说明即使把可读数据搬到最前面，也无法腾出足够的连续空间，因此必须扩容。扩容后大小至少为 `writerIndex_ + length`（保留当前已写入数据）。
+
+否则，可以进行搬移：
+```cpp
+assert(kCheapPrepend < readerIndex_);
+const std::size_t readable = readableBytes();
+std::copy(begin() + readerIndex_, begin() + writerIndex_, begin() + kCheapPrepend);
+readerIndex_ = kCheapPrepend;
+writerIndex_ = readerIndex_ + readable;
+```
+- **搬移操作**：将当前可读数据从原来的位置（`readerIndex_`）**拷贝到缓冲区的起始偏移 `kCheapPrepend`（即 8）处**，覆盖掉之前的前置空间和已消费数据。
+- **更新指针**：`readerIndex_` 重置为 8，`writerIndex_` 设置为 `8 + readable`。
+- **效果**：释放了尾部大量空间，因为所有可读数据现在都紧挨着头部预留区，尾部变得连续可用。
+- **注意**：这里只用 `std::copy` 拷贝可读数据，并不移动已消费的数据，所以效率很高（只是内存拷贝，大小等于当前未读数据量）。
+
+---
+
+##### 八、设计精要总结
+
+1. **`readFd` 的 `readv` 技巧**：利用栈上额外缓冲区，一次系统调用即可读完大量数据，显著提升吞吐量。
+2. **`makeSpace` 的搬移策略**：优先通过搬移数据释放尾部空间，避免频繁扩容带来的内存重分配和拷贝。
+3. **前置预留 `kCheapPrepend`**：始终保留 8 字节头部，使得“在数据前追加协议头”变得零成本。
+4. **`retrieve` 不真正清除内存**：仅仅移动指针，高效且可重复利用已分配的内存。
+5. **`ensureWritableBytes` + `hasWritten` 分离**：允许外部直接写入 `beginWrite()` 区域，避免额外拷贝。
+
+---
+
+##### 九、使用示例回顾
+
+- **接收数据**：调用 `readFd`，数据进入 Buffer。
+- **解析**：用 `peek()` 和 `readableBytes()` 查看数据，用 `findEOL()` 查找行尾。
+- **消费**：调用 `retrieveAsString(length)` 取出完整包并丢弃。
+- **发送**：调用 `append(data)` 将响应写入 Buffer，然后在可写事件中调用 `writeFd` 发送。
+
+至此，整个 Buffer 类的实现已剖析完毕。如果你对某个细节（比如 `std::copy` 的异常安全，或 `readv` 的性能对比）还有疑问，可以随时追问。😊
 
 # question
 
