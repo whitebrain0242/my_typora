@@ -3755,3 +3755,614 @@ HKDF（基于HMAC的密钥派生函数）是一个标准化的密钥派生函数
              └────────────→ 加密通信
 ```
 
+#### DAY25
+
+##### std::function
+
+`std::function` 是 C++ 标准库中一个**非常强大且通用的“函数包装器”**
+
+`std::function` 就像一个“盒子”：
+
+```
+std::function<void()> callback;
+```
+
+意思是：
+
+>   这个盒子可以装任何一种“**不接受参数、返回 `void` 的可调用对象**”。
+
+最后记一个公式
+
+```
+std::function<R(A, B, C)> f;
+```
+
+意味着：
+
+```
+f(A类型的值, B类型的值, C类型的值)
+       ↓
+      调用
+       ↓
+返回 R
+```
+
+例如：
+
+```
+std::function<std::string(int, double)> f;
+```
+
+那么：
+
+```
+std::string result = f(10, 3.14);
+```
+
+就是：
+
+>   **传两个参数进去：一个 `int`，一个 `double`；然后拿回来一个 `std::string`。**
+
+##### std::atomic<bool>
+
+`td::atomic<bool>` 可以先简单理解成：
+
+>   **一个“线程安全地读写 `bool`”的变量。**
+
+它主要用于**多线程**场景。
+
+###### 1. 普通 `bool` 有什么问题？
+
+假设：
+
+```
+bool running = true;
+```
+
+有两个线程：
+
+```
+线程 A                  线程 B
+  │                       │
+  │                       │
+读取 running              修改 running
+  │                       │
+  ▼                       ▼
+true                     false
+```
+
+如果两个线程同时访问这个变量，而且至少一个线程在修改它，就可能产生**数据竞争（data race）**。
+
+例如：
+
+```
+bool running = true;
+
+
+void thread1() {
+    while (running) {
+        // 工作
+    }
+}
+
+
+void thread2() {
+    running = false;
+}
+```
+
+看起来非常合理：
+
+>   线程 1 一直工作，线程 2 把 `running` 设置成 `false`，让线程 1 停下来。
+
+但如果这是实际的多线程代码，普通 `bool` 就存在数据竞争问题。
+
+------
+
+###### 2. 换成 `std::atomic<bool>`
+
+```
+std::atomic<bool> running = true;
+```
+
+然后：
+
+```
+void thread1() {
+    while (running) {
+        // 工作
+    }
+}
+
+
+void thread2() {
+    running = false;
+}
+```
+
+这样就是线程安全的。
+
+`std::atomic<bool>` 保证对这个变量的访问是**原子的（atomic）**。
+
+------
+
+###### 3. 什么叫“原子”？
+
+你可以先把“原子”理解成：
+
+>   **这个操作不会被其他线程从中间插进来。**
+
+比如：
+
+```
+running = false;
+```
+
+对于 `std::atomic<bool>` 来说，可以把它想象成：
+
+```
+线程 A
+   │
+   │ 把 running 改成 false
+   ▼
+┌──────────┐
+│  完整完成 │
+└──────────┘
+   │
+   ▼
+其他线程才能看到这个操作的结果
+```
+
+不会出现一种“不完整的修改状态”。
+
+------
+
+###### 4. 最常见的用途：线程停止信号
+
+这是 `std::atomic<bool>` 最经典的用法。
+
+例如：
+
+```
+std::atomic<bool> running{true};
+
+
+void worker() {
+    while (running) {
+        doSomething();
+    }
+}
+
+
+int main() {
+
+
+    std::thread t(worker);
+
+
+    // 做一些事情
+    // ...
+
+
+    running = false;
+
+
+    t.join();
+}
+```
+
+逻辑就是：
+
+```
+main线程                         worker线程
+
+
+    │                                │
+    │                                ▼
+    │                           while(running)
+    │                                │
+    │                                ▼
+    │                            doSomething()
+    │                                │
+    │                                ▼
+    │                           while(running)
+    │
+    │
+    └── running = false ─────────────┤
+                                     │
+                                     ▼
+                              while(false)
+                                     │
+                                     ▼
+                                   退出
+```
+
+所以你以后看到：
+
+```
+std::atomic<bool> xxx;
+```
+
+很大概率它是在干：
+
+>   **在线程之间传递一个简单的状态/开关。**
+
+比如：
+
+```
+std::atomic<bool> running;
+std::atomic<bool> stopped;
+std::atomic<bool> connected;
+std::atomic<bool> ready;
+std::atomic<bool> shutdown;
+```
+
+------
+
+###### 5. 那它和普通 `bool` 有什么区别？
+
+最核心就是：
+
+```
+bool
+```
+
+是普通变量。
+
+而：
+
+```
+std::atomic<bool>
+```
+
+是专门为并发访问设计的原子变量。
+
+例如：
+
+```
+std::atomic<bool> flag{false};
+```
+
+可以：
+
+```
+flag = true;
+```
+
+也可以：
+
+```
+bool value = flag;
+```
+
+也可以：
+
+```
+if (flag) {
+    // ...
+}
+```
+
+使用起来看上去和 `bool` 很像。
+
+------
+
+###### 6. 还可以显式使用 `load()` / `store()`
+
+你可能会在代码里看到：
+
+```
+flag.load();
+```
+
+和：
+
+```
+flag.store(true);
+```
+
+例如：
+
+```
+std::atomic<bool> flag{false};
+
+
+flag.store(true);
+
+
+bool value = flag.load();
+```
+
+它们分别就是：
+
+```
+store()
+   ↓
+写入
+
+
+load()
+   ↓
+读取
+```
+
+所以：
+
+```
+flag = true;
+```
+
+可以理解成：
+
+```
+flag.store(true);
+```
+
+而：
+
+```
+bool x = flag;
+```
+
+可以理解成：
+
+```
+bool x = flag.load();
+```
+
+日常代码里直接写：
+
+```
+flag = true;
+if (flag) { ... }
+```
+
+非常常见。
+
+##### 条件变量
+
+>   条件变量 = 让一个线程“睡觉等待某个条件”，当另一个线程把条件准备好之后，把它叫醒。
+
+###### 为什么需要？
+
+如果现在队列是空的呢？
+
+消费者怎么办？
+
+最差的写法可能是：
+
+```
+while (queue.empty()) {
+    // 什么都不干
+}
+```
+
+这叫**忙等（busy waiting）**。
+
+CPU 会一直跑：
+
+```
+检查 → 空
+检查 → 空
+检查 → 空
+检查 → 空
+检查 → 空
+...
+```
+
+非常浪费 CPU。
+
+###### 怎么做？
+
+我们希望消费者：
+
+>   “没任务的时候，你别一直检查，先睡觉。等有任务了，我再叫醒你。”
+
+于是：
+
+```
+std::condition_variable cv;
+```
+
+消费者：
+
+```
+cv.wait(...);
+```
+
+生产者：
+
+```
+cv.notify_one();
+```
+
+于是：
+
+```
+消费者线程
+    │
+    │ queue为空
+    ▼
+  wait()
+    │
+    ▼
+  睡觉 😴
+    │
+    │
+    │
+生产者线程
+    │
+    │ queue.push(task)
+    ▼
+notify_one()
+    │
+    ▼
+消费者被唤醒
+    │
+    ▼
+取出 task
+```
+
+这就是条件变量最核心的作用。
+
+**`wait()` 到底干了什么？**
+
+这是理解条件变量最关键的地方。
+
+你看到：
+
+```
+cv.wait(lock, [] {
+    return ready;
+});
+```
+
+不要把它简单理解成“等待”。
+
+它实际上做了三件重要的事情：
+
+###### 第一：释放 mutex
+
+线程 A 原本：
+
+```
+lock(mutex);
+```
+
+然后调用：
+
+```
+cv.wait(lock, ...);
+```
+
+进入等待之后，它会**释放 mutex**。
+
+为什么？
+
+因为如果不释放：
+
+```
+线程 A
+持有 mutex
+   ↓
+wait
+   ↓
+睡觉
+```
+
+那么线程 B 根本拿不到 mutex：
+
+```
+线程 B
+   ↓
+想修改 ready
+   ↓
+需要 mutex
+   ↓
+拿不到
+```
+
+那就死锁了。
+
+所以 `wait()` 会：
+
+```
+释放 mutex
+    ↓
+睡眠
+```
+
+------
+
+###### 第二：线程睡眠
+
+不会继续占用 CPU。
+
+------
+
+###### 第三：被唤醒之后重新拿 mutex
+
+当其他线程：
+
+```
+cv.notify_one();
+```
+
+之后，线程 A 会醒来。
+
+但它不是直接继续往下执行。
+
+它首先要：
+
+>   **重新获取 mutex。**
+
+拿到以后才继续检查条件。
+
+条件变量最常见的两个函数：
+
+```
+cv.notify_one();
+```
+
+和：
+
+```
+cv.notify_all();
+```
+
+`notify_one()`
+
+叫醒**一个**等待中的线程。
+
+例如：
+
+```
+worker1 😴
+worker2 😴
+worker3 😴
+worker4 😴
+
+
+       notify_one()
+
+
+worker1 😀
+worker2 😴
+worker3 😴
+worker4 😴
+```
+
+通常适合：
+
+>   队列来了一个任务 → 叫醒一个 worker。
+
+`notify_all()`
+
+叫醒**所有**等待中的线程。
+
+```
+worker1 😴
+worker2 😴
+worker3 😴
+worker4 😴
+
+
+       notify_all()
+
+
+worker1 😀
+worker2 😀
+worker3 😀
+worker4 😀
+```
+
+线程池关闭的时候非常常见：
+
+```
+stop = true;
+cv.notify_all();
+```
+
+因为你希望：
+
+>   **所有 worker 都醒来，然后发现 `stop == true`，退出。**
