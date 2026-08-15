@@ -3251,7 +3251,7 @@ const std::vector<EventLoop*>& EventLoopThreadPool::getAllLoops() const noexcept
 
 
 
-### Acceptor
+#### Acceptor
 
 好的，这是 **`Acceptor` 类的实现**。`Acceptor` 是 mini muduo 网络库中专门负责 **“接受（Accept）新连接”** 的组件。它的核心职责是：**监听一个 TCP 端口，当有新连接到达时，接受该连接，并将新建立的 socket 文件描述符（fd）交给上层业务处理。**
 
@@ -3456,6 +3456,8 @@ void Acceptor::handleRead() {
 **一句话总结**：`Acceptor` 是 mini muduo 的 **“连接受理器”**，它封装了监听 socket 的创建、绑定、监听和接受连接的全部流程，并将新连接通过回调安全地交给上层，是 `TcpServer` 实现“主从 Reactor”模型的基础组件。😊
 
 
+
+#### TlsContext
 
 
 
