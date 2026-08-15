@@ -4366,3 +4366,53 @@ cv.notify_all();
 因为你希望：
 
 >   **所有 worker 都醒来，然后发现 `stop == true`，退出。**
+
+#### DAY26
+
+##### TLS使用
+
+TLS是一个异步状态机，我们把实际的使用分为两个模块——握手+通信
+
+| 函数                             | 作用                      | 参数要点              | 返回值                         |
+| :------------------------------- | :------------------------ | :-------------------- | :----------------------------- |
+| `TLS_server_method()`            | 获取支持 TLS 的服务端方法 | 无                    | `const SSL_METHOD*`            |
+| `SSL_CTX_new()`                  | 创建 SSL_CTX 对象         | `method`              | `SSL_CTX*`，失败返回 `NULL`    |
+| `SSL_CTX_use_certificate_file()` | 加载证书文件              | `ctx`, `file`, `type` | `1` 成功，`<=0` 失败           |
+| `SSL_CTX_use_PrivateKey_file()`  | 加载私钥文件              | 同上                  | 同上                           |
+| `SSL_new()`                      | 为连接创建 SSL 对象       | `ctx`                 | `SSL*`，失败返回 `NULL`        |
+| `SSL_set_fd()`                   | 绑定 socket fd            | `ssl`, `fd`           | 无返回值                       |
+| `SSL_accept()`                   | 服务端握手（阻塞）        | `ssl`                 | `1` 成功，`<=0` 失败           |
+| `SSL_write()`                    | 发送加密数据              | `ssl`, `buf`, `len`   | 成功返回字节数，失败 `<=0`     |
+| `SSL_shutdown()`                 | 关闭 TLS 连接             | `ssl`                 | `1` 完全关闭，`0` 需要再次调用 |
+| `SSL_free()`                     | 释放 SSL 对象             | `ssl`                 | 无                             |
+| `ERR_print_errors_fp()`          | 打印错误栈                | `stderr`              | 无                             |
+| `SSL_CTX_free()`                 | 释放上下文                | `ctx`                 | 无                             |
+
+```
+第 1 步（全局一次）：SSL_CTX_new() -> 创建那个“模具”（SSL_CTX），加载证书和私钥进去（configure_context）。
+
+第 2 步（每来一个客户端）：accept() 阻塞等待，拿到了一个普通的 TCP 客户端 socket（client_fd）。此时还是明文通道。
+
+第 3 步（每来一个客户端）：SSL_new(ctx) -> 基于全局模具，为这个客户端单独创建一个 SSL 对象。
+
+第 4 步（每来一个客户端）：SSL_set_fd(ssl, client_fd) -> 把刚才那个普通的 TCP socket，“塞进” 这个 SSL 对象里。告诉 OpenSSL：“以后这个连接归你管了”。
+
+第 5 步（每来一个客户端）：TLS 握手。服务端调用 SSL_accept(ssl)（阻塞版）或 SSL_do_handshake（非阻塞版）。这一步就是你们之前学的 ClientHello、ServerHello、Certificate、Finished 等加密参数的协商。
+
+第 6 步（每来一个客户端）：加密通信。握手成功后，调用 SSL_write(ssl, data, len) 发送数据，调用 SSL_read(ssl, buf, size) 接收数据。所有的明文数据在这里进出，OpenSSL 自动帮你完成加密和解密。
+
+第 7 步（每来一个客户端）：SSL_shutdown(ssl) -> 发送关闭通知；SSL_free(ssl) -> 释放这个连接专属的 SSL 对象；close(client_fd) -> 关闭底层的 TCP socket。
+```
+
+##### TLS禁止压缩
+
+```c++
+SSL_CTX_set_options(
+    context,
+    SSL_OP_NO_COMPRESSION
+);
+```
+
+为什么禁止压缩？
+
+可能用户连发5条相同的消息的时候，会压缩成 “消息*5”，但是可能攻击者会根据加密数据长度，推断出消息，所以我们**禁止压缩**
