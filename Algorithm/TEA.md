@@ -719,7 +719,23 @@ cur->next=list1?list1:list2;
 
 
 
+###### 双指针查找两个数字之和等于某值
 
+```c++
+vector<int>res;
+int left=0;
+int right=res.size()-1;
+while(left<right){
+    int sum=res[left]+res[right];
+    if(sum==k){
+        return true;
+    }else if(sum<k){
+        left++;
+    }else{
+        right++;
+    }
+}
+```
 
 
 
@@ -1089,4 +1105,3 @@ public:
 
 
 
-````
