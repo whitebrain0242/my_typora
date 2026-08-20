@@ -1089,11 +1089,60 @@ public:
 };
 ```
 
+  
 
 
 
+##### 二叉树的最近公共祖先P236
 
+我们首先要判断两个节点的位置
 
+边界:如果节点是空节点或者是任意一个节点,那么直接返回,意味着找到了位置
+
+我们分类讨论:
+
+1.   如果节点在左右两个子树上都存在,那么最近的公共祖先是当前节点
+2.   如果只有左子树存在,那么我们返回左子树
+3.   如果只有右子树存在,那么我们返回右子树
+
+```c++
+class Solution {
+public:
+    TreeNode* lowestCommonAncestor(TreeNode* root, TreeNode* p, TreeNode* q) {
+        if(!root||root==p||root==q){
+            return root;
+        }
+        TreeNode*left=lowestCommonAncestor(root->left,p,q);
+        TreeNode*right=lowestCommonAncestor(root->right,p,q);
+        if(left&&right)return root;
+        if(left&&!right)return left;
+        return right;
+    }
+};
+```
+
+##### 二叉搜索树的最近公共祖先
+
+因为是二叉搜索树,我们就可以直接判断节点值的大小从而判断位置,而不用看递归是否存在
+
+分类讨论:
+
+1.   如果两个节点值都小于当前节点值,那么两者都在左子树上,祖先也在左子树上,递归左子树
+2.   如果两个节点值都大于当前节点值,那么二者都在右子树上,祖先也在右子树上,递归右子树
+3.   如果不是以上两种情况,代表两个节点在左右子树上,那么返回当前节点
+
+```c++
+class Solution {
+public:
+    TreeNode* lowestCommonAncestor(TreeNode* root, TreeNode* p, TreeNode* q) {
+        if(p->val<root->val&&q->val<root->val)
+        return lowestCommonAncestor(root->left,p,q);
+        if(p->val>root->val&&q->val>root->val)
+        return lowestCommonAncestor(root->right,p,q);
+        return root;       
+    }
+};
+```
 
 
 
