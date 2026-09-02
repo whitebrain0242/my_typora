@@ -1091,7 +1091,7 @@ public:
 
   
 
-
+#### 最近公共祖先
 
 ##### 二叉树的最近公共祖先P236
 
@@ -1146,9 +1146,61 @@ public:
 
 
 
+#### 创建二叉树
+
+递归构造二叉树，找到左边界和右边界，通过根节点递归找出左右部分
+
+相关题目有：升序数组，二叉搜索树
+
+##### 将有序数组转换为二叉搜索树P108
+
+1. 升序数组，那么我们要找到中间节点作为根节点
+2. 递归左右部分
+
+```c++
+TreeNode* helper(vector<int>& nums, int left, int right) {
+        if (left > right) {
+            return nullptr;
+        }
+
+       // 找到中间节点作为根节点
+        int mid = (left + right) / 2;
+
+        TreeNode* root = new TreeNode(nums[mid]);
+    //递归处理左右子树
+        root->left = helper(nums, left, mid - 1);
+        root->right = helper(nums, mid + 1, right);
+        return root;
+    }
+
+```
 
 
 
+##### 前序遍历构造二叉搜索树P1008
+
+1. 前序遍历的话，那么第一个元素是根节点
+2. 剩余元素中，小于根节点的是左子树，大于根节点的是右子树
+3. 我们只需要找到第一个比根节点大的位置mid，划分为左右子树两个区间，递归构建
+
+```c++
+TreeNode*dfs(const vector<int>& preorder, int left, int right) {
+        if(left>right)return  nullptr;
+    //先找到根节点，然后构建根节点
+        int rootVal=preorder[left];
+        TreeNode* root=new TreeNode(rootVal);
+    //区分左右子树空间
+        int mid=left+1;
+        while(mid<=right&&preorder[mid]<rootVal){
+            mid++;
+        }
+    //递归构建左右子树
+        root->left=dfs(preorder, left+1, mid-1);
+        root->right=dfs(preorder, mid, right);
+    //最后返回
+        return root;
+    }
+```
 
 
 

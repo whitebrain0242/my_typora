@@ -1,3 +1,0 @@
-enabled=true
-certificate_file=config/tls/server.crt
-private_key_file=config/tls/server.key

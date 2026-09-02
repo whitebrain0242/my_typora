@@ -1,6 +1,0 @@
-host=127.0.0.1
-port=3306
-user=chatroom
-password=replace_with_a_strong_password
-database=chatroom
-connect_timeout_seconds=5
