@@ -1149,6 +1149,7 @@ public:
 #### 创建二叉树
 
 递归构造二叉树，找到左边界和右边界，通过根节点递归找出左右部分
+这种做法还可以将一个有序数组（中序遍历二叉搜索树）变得平衡，取中间值作为根节点，左右是左右子树
 
 相关题目有：升序数组，二叉搜索树
 
@@ -1203,6 +1204,36 @@ TreeNode*dfs(const vector<int>& preorder, int left, int right) {
 ```
 
 
+##### 前中后序遍历序列构造二叉树
+其实就是先找左子树的大小之后把区间都分开
+把左子树右子树区间都分开来，然后交给函数去递归
+```
+class Solution {
 
+public:
 
+TreeNode* buildTree(vector<int>& preorder, vector<int>& inorder) {
+
+if(preorder.empty())return nullptr;
+
+int leftsize=ranges::find(inorder,preorder[0])-inorder.begin();//这样找到了左子树的大小
+
+vector<int> pre1(preorder.begin()+1,preorder.begin()+1+leftsize);
+
+vector<int> pre2(preorder.begin()+1+leftsize,preorder.end());
+
+vector<int> in1(inorder.begin(),inorder.begin()+leftsize);
+
+vector<int> in2(inorder.begin()+leftsize+1,inorder.end());
+
+TreeNode* left=buildTree(pre1,in1);
+
+TreeNode* right=buildTree(pre2,in2);
+
+return new TreeNode(preorder[0],left,right);
+
+}
+
+};
+```
 
