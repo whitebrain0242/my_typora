@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "表情符号常用喵喵喵.md",
+                "file": "artical/AI是怎么回事？/去媚AI.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "表情符号常用喵喵喵"
+              "title": "去媚AI"
             }
           }
         ]
@@ -82,25 +82,24 @@
           {
             "id": "279e6234dfb097ea",
             "type": "leaf",
-            "pinned": true,
             "state": {
               "type": "outline",
               "state": {
-                "file": "Algorithm/TEA.md",
+                "file": "artical/AI是怎么回事？/去媚AI.md",
                 "followCursor": true,
                 "showSearch": false,
                 "searchQuery": ""
               },
-              "pinned": true,
               "icon": "lucide-list",
-              "title": "TEA 的大纲"
+              "title": "大纲"
             }
           }
-        ]
+        ],
+        "currentTab": 3
       }
     ],
     "direction": "horizontal",
-    "width": 301
+    "width": 200
   },
   "right": {
     "id": "5afc831b281d15c8",
@@ -207,9 +206,15 @@
   },
   "active": "5903acfcad6e497c",
   "lastOpenFiles": [
-    "2. 数据表的基本操作.md",
-    "表情符号常用喵喵喵.md",
     "py.md",
+    "artical/AI是怎么回事？/去媚AI.md",
+    "artical/AI是怎么回事？",
+    "artical",
+    "Blair.md",
+    "表情符号常用喵喵喵.md",
+    "obsidian-mistake-notebook-main",
+    "Algorithm/TEA.md",
+    "2. 数据表的基本操作.md",
     "C++.md",
     "Data Structure/typedef的使用.md",
     "CPU.md",
@@ -218,8 +223,6 @@
     "Data Structure/SKY.md",
     "Data Structure/顺序表和链表的区别.md",
     "Data Structure/串和线性表的关联.md",
-    "Algorithm/TEA.md",
-    "未命名",
     "一、三个人共同学习：第一部分 Linux 1.md",
     "一、三个人共同学习：第一部分 Linux.md",
     "未命名.base",
