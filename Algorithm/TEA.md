@@ -1207,7 +1207,7 @@ TreeNode*dfs(const vector<int>& preorder, int left, int right) {
 ##### 前中后序遍历序列构造二叉树
 其实就是先找左子树的大小之后把区间都分开
 把左子树右子树区间都分开来，然后交给函数去递归
-```
+```c++
 class Solution {
 
 public:
@@ -1237,3 +1237,71 @@ return new TreeNode(preorder[0],left,right);
 };
 ```
 
+#### 二叉树BFS
+对于之前的递归是从根节点沿着一条路线走到尽头，但是BFS是广度优先搜索，是一层一层的访问的
+##### 层序遍历P102
+维护两个数组，一个是这一层的节点，一个是下一层的节点
+每一次遍历的时候，把值加入结果数组中
+```c++
+class Solution {
+public:
+    vector<vector<int>> levelOrder(TreeNode* root) {
+        if (root == nullptr) {
+            return {};
+        }
+        vector<vector<int>> ans;
+        vector<TreeNode*> cur = {root};
+        while (cur.size()) {
+            vector<TreeNode*> nxt;
+            vector<int> vals;
+            //遍历当前层
+            for (auto node : cur) {
+            //把当前层的数值加入数组中
+                vals.push_back(node->val);
+                //把子树加入nxt数组
+                if (node->left)  nxt.push_back(node->left);
+                if (node->right) nxt.push_back(node->right);
+            }
+            //转移层和值
+            cur = move(nxt);
+            ans.push_back(move(vals));
+        }
+        return ans;
+    }
+};
+```
+
+使用队列
+
+```c
+class Solution {
+public:
+    vector<vector<int>> levelOrder(TreeNode* root) {
+        if (root == nullptr) {
+            return {};
+        }
+        vector<vector<int>> ans;
+        queue<TreeNode*> q;
+        q.push(root);
+        while (!q.empty()) {
+            vector<int> vals;
+            //遍历当前层
+            for (int n = q.size(); n--;) {//记录当前层的所有节点
+                auto node = q.front();//取出队首元素
+                q.pop();//弹出
+                ////把当前层的数值加入数组中
+                vals.push_back(node->val);
+                ////把子树加入nxt数组
+                if (node->left)  q.push(node->left);
+                if (node->right) q.push(node->right);
+            }
+            ////转移层和值
+            ans.push_back(move(vals));
+        }
+        return ans;
+    }
+};
+```
+
+**为什么先记录 `n = q.size()`？**
+在 `for` 循环中，我们同时会向队列尾部添加新节点（左右子节点）。如果不提前记录当前层的节点数，`q.size()` 会动态增长，导致我们错误地把下一层的节点也当成当前层来处理。所以必须**在开始处理这一层之前**固定住 `n`，确保只弹出当前层的节点
