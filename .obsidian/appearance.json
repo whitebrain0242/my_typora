@@ -1,5 +1,6 @@
 {
-  "accentColor": "#239acd",
+  "accentColor": "",
   "cssTheme": "Blue Topaz",
-  "theme": "system"
+  "theme": "system",
+  "baseFontSizeAction": true
 }
