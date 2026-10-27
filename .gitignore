@@ -1,0 +1,24 @@
+.obsidian/plugins/
+# ===== Obsidian 插件目录（不版本化插件本体）=====
+.obsidian/plugins/
+
+# ===== Obsidian 高频变动的本机状态文件 =====
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json
+.obsidian/cache
+.obsidian/workspace
+.obsidian/workspaces.json
+
+# ===== Obsidian 临时/回收站 =====
+.obsidian/trash/
+.trash/
+
+# ===== 系统与编辑器噪音 =====
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# ===== 常见临时文件 =====
+*.tmp
+*.log
