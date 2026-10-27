@@ -22,3 +22,4 @@ Thumbs.db
 # ===== 常见临时文件 =====
 *.tmp
 *.log
+.obsidian/plugins/remotely-save/
