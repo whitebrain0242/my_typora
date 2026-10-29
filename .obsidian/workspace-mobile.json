@@ -4,21 +4,21 @@
     "type": "split",
     "children": [
       {
-        "id": "124ee7452e657130",
+        "id": "fd1b2e9a8cfa7bb1",
         "type": "tabs",
         "children": [
           {
-            "id": "7e8b2388bd70cd89",
+            "id": "20b80b682313d617",
             "type": "leaf",
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Algorithm/Notes/HOT 100/未命名.md",
+                "file": "Algorithm/Notes/HOT 100/239. 滑动窗口最大值.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "未命名"
+              "title": "239. 滑动窗口最大值"
             }
           }
         ]
@@ -49,7 +49,7 @@
         "state": {
           "type": "search",
           "state": {
-            "query": "10-27",
+            "query": "10-29",
             "matchingCase": false,
             "explainSearch": false,
             "collapseAll": false,
@@ -100,7 +100,7 @@
         }
       }
     ],
-    "currentTab": 0
+    "currentTab": 1
   },
   "right": {
     "id": "a405939be08713cd",
@@ -176,10 +176,15 @@
       "obsidian-spaced-repetition:复习卡片": false
     }
   },
-  "active": "7e8b2388bd70cd89",
+  "active": "20b80b682313d617",
   "lastOpenFiles": [
-    "Algorithm/Notes/HOT 100/模板.md",
+    "Algorithm/Notes/HOT 100/239. 滑动窗口最大值.md",
+    "Algorithm/Notes/HOT 100/3. 无重复字符的最长子串.md",
+    "Algorithm/Notes/HOT 100/1. 两数之和.md",
+    "未命名.canvas",
+    "Algorithm/Notes/HOT 100/42.接雨水.md",
     "Algorithm/Notes/HOT 100/未命名.md",
+    "Algorithm/Notes/HOT 100/模板.md",
     "Algorithm/Notes/HOT 100/438. 找到字符串中所有字母异位词.md"
   ]
 }
