@@ -2887,7 +2887,7 @@ void swap(int *a,int *b){//交换
 被删除元素用堆底代替，直到无法下坠
 
 ```c
-void HaedAdjust(int a[],int k,int len){//调整成大根堆
+void HeapAdjust(int a[],int k,int len){//调整成大根堆
      a[0]=a[k];//k是根，a[0]暂时存储根结点
      for(int i=2*k;i<=len;i*=2){//从左子树开始
           if(i<len&&a[i]<a[i+1])i+=1;//和右子树比较,i指向更大的那一个
