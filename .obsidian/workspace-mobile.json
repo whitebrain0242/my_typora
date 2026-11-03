@@ -100,7 +100,7 @@
         }
       }
     ],
-    "currentTab": 1
+    "currentTab": 0
   },
   "right": {
     "id": "a405939be08713cd",
@@ -177,8 +177,9 @@
       "obsidian-spaced-repetition:复习卡片": false
     }
   },
-  "active": "620c86d36bfed1d5",
+  "active": "414fb9294b86db9a",
   "lastOpenFiles": [
+    "Algorithm/Notes/HOT 100/283. 移动零.md",
     "Algorithm/Notes/HOT 100/1. 两数之和.md",
     "Algorithm/Notes/HOT 100/56. 合并区间.md",
     "Algorithm/Notes/HOT 100/15. 三数之和.md",
