@@ -1,0 +1,7 @@
+# 让 Markdown 参与语言识别，成为仓库主语言
+*.md linguist-detectable=true
+*.md linguist-language=Markdown
+
+# Obsidian 插件资源是第三方文件，不计入统计
+.obsidian/** linguist-vendored
+.obsidian/** linguist-documentation
