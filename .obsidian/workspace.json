@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Algorithm/Notes/HOT 100/53. 最大子数组和.md",
+                "file": "Algorithm/Notes/HOT 100/160. 相交链表.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "53. 最大子数组和"
+              "title": "160. 相交链表"
             }
           }
         ]
@@ -98,8 +98,7 @@
       }
     ],
     "direction": "horizontal",
-    "width": 200,
-    "collapsed": true
+    "width": 200
   },
   "right": {
     "id": "5afc831b281d15c8",
@@ -202,16 +201,18 @@
   },
   "active": "649b4aba3ccb03de",
   "lastOpenFiles": [
+    "Algorithm/Notes/HOT 100/模板.md",
+    "Algorithm/Notes/HOT 100/160. 相交链表.md",
+    "Algorithm/Notes/HOT 100/1. 两数之和.md",
+    "Algorithm/Notes/HOT 100/912. 排序数组.md",
+    "Algorithm/Notes/HOT 100/53. 最大子数组和.md",
     "Algorithm/Notes/HOT 100/239. 滑动窗口最大值.md",
     "Algorithm/Notes/HOT 100/49. 字母异位词分组.md",
     "Algorithm/Notes/HOT 100/76. 最小覆盖子串.md",
     "Algorithm/Notes/HOT 100/560. 和为 K 的子数组.md",
     "Algorithm/Notes/HOT 100/189. 轮转数组.md",
-    "Algorithm/Notes/HOT 100/912. 排序数组.md",
-    "Algorithm/Notes/HOT 100/53. 最大子数组和.md",
     "Algorithm/Notes/HOT 100/42.接雨水.md",
     "Algorithm/Notes/HOT 100/Mini.md",
-    "Algorithm/Notes/HOT 100/模板.md",
     "Algorithm/Notes/HOT 100/未命名.md",
     "2026-11-13.md",
     "Algorithm/Notes/HOT 100/3. 无重复字符的最长子串.md",
@@ -228,13 +229,11 @@
     "Algorithm/Notes/HOT 100/附件",
     "Pasted image 20261031130937.png",
     "Algorithm/Notes/HOT 100/283. 移动零.md",
-    "Algorithm/Notes/HOT 100/1. 两数之和.md",
     "().md",
     "project/6.5840/Lab1/消息处理.md",
     "project/6.5840/Lab1",
     "project/6.5840",
     "project",
-    "Algorithm/Notes/HOT 100/11. 盛最多水的容器.md",
     "Algorithm/Questions",
     "Algorithm/Notes/HOT 100/未命名",
     "Algorithm/Notes/HOT 100",
